@@ -1,0 +1,21 @@
+{
+  "name": "whatsapp-order-confirmation-bot",
+  "version": "0.1.0",
+  "description": "AI-powered WhatsApp order confirmation + upsell/cross-sell bot for WooCommerce",
+  "main": "src/server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "simulate": "node scripts/simulate.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.32.0",
+    "axios": "^1.7.7",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
