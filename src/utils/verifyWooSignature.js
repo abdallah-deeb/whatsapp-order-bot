@@ -16,11 +16,24 @@ function verifyWooSignature(req) {
   if (!signatureHeader || !req.rawBody) return false;
 
   const expected = crypto.createHmac('sha256', secret).update(req.rawBody).digest('base64');
+
+  let match = false;
   try {
-    return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signatureHeader));
-  } catch {
-    return false;
+    match = crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signatureHeader));
+  } catch (err) {
+    console.warn('⚠️ تعذّر مقارنة التوقيعين (طول مختلف على الأرجح):', err.message);
   }
+
+  if (!match) {
+    // تشخيص مؤقت: بيوريني في اللوج التوقيعين عشان نلاقي سبب الاختلاف بالظبط.
+    // مش بيطبع الـ body كامل ولا الـ secret نفسه، بس التوقيعين وطولهم.
+    console.warn('🔎 [DEBUG] توقيع WooCommerce المستلم:', signatureHeader);
+    console.warn('🔎 [DEBUG] التوقيع المتوقع من السيرفر:', expected);
+    console.warn('🔎 [DEBUG] طول الـ rawBody بالبايت:', req.rawBody ? req.rawBody.length : 'undefined');
+    console.warn('🔎 [DEBUG] Content-Type المستلم:', req.headers['content-type']);
+  }
+
+  return match;
 }
 
 module.exports = { verifyWooSignature };
