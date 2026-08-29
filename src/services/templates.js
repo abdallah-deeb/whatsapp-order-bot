@@ -32,6 +32,20 @@ function buildOrderConfirmationMessage(order) {
   ].join('\n');
 }
 
+/**
+ * بيبني قايمة المتغيرات لقالب واتساب المعتمد "order_confirmation" —
+ * لازم يكون بنفس ترتيب المتغيرات بالظبط زي ما اتعمل في واتي:
+ * {{1}} = اسم العميل، {{2}} = رقم الأوردر، {{3}} = الإجمالي، {{4}} = العنوان.
+ */
+function buildOrderConfirmationTemplateParams(order) {
+  return [
+    { name: '1', value: order.customerName },
+    { name: '2', value: String(order.id) },
+    { name: '3', value: formatCurrency(order.total, order.currency) },
+    { name: '4', value: order.shippingAddress },
+  ];
+}
+
 function buildOrderConfirmedReply(order) {
   return `تمام يا ${order.customerName}! ✅ تم تأكيد طلبك رقم #${order.id} وهيتجهز حالًا. هنبعتلك تحديث لما يطلع للشحن.`;
 }
@@ -68,6 +82,7 @@ function buildUpsellMessage(order, suggestion) {
 
 module.exports = {
   buildOrderConfirmationMessage,
+  buildOrderConfirmationTemplateParams,
   buildOrderConfirmedReply,
   buildOrderCancelledReply,
   buildEditAcknowledgedReply,
