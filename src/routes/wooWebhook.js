@@ -36,9 +36,11 @@ router.post('/order-created', async (req, res) => {
     `📦 أوردر جديد #${order.id} — هنبعت تأكيد واتساب لرقم ${order.customerPhone} (زي ما اتسجل: ${order.customerPhoneDisplay})`
   );
 
-  const message = templates.buildOrderConfirmationMessage(order);
+  // أول رسالة بتتبعت لعميل جديد لازم تكون قالب معتمد من ميتا (Business-Initiated) —
+  // مينفعش نبعت رسالة حرة (Session Message) لأن مفيش محادثة مفتوحة معاه أصلًا.
+  const templateParams = templates.buildOrderConfirmationTemplateParams(order);
   try {
-    const result = await whatsapp.sendMessage(order.customerPhone, message);
+    const result = await whatsapp.sendTemplateMessage(order.customerPhone, 'order_confirmation', templateParams);
     console.log(`✅ اتبعتت رسالة تأكيد الأوردر #${order.id} بنجاح عبر ${result.provider}`);
   } catch (err) {
     const details = err.response ? JSON.stringify(err.response.data) : err.message;
