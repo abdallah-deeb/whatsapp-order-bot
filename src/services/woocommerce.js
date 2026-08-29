@@ -20,6 +20,31 @@ function client() {
 }
 
 /**
+ * بيحوّل رقم موبايل مصري من الصيغة المحلية اللي بتتسجل في الأوردر
+ * (زي 01012401365) للصيغة الدولية اللي واتساب/واتي محتاجينها (201012401365).
+ * من غير التحويل ده، الرسالة مش بتوصل خالص لأن الرقم مش بيبقى معرّف واتساب حقيقي —
+ * ده كان سبب المشكلة اللي بنشخصها.
+ */
+function normalizeEgyptPhone(rawPhone) {
+  let digits = String(rawPhone || '').replace(/[^\d]/g, '');
+  if (!digits) return '';
+
+  // بعض الصيغ القديمة بتكتب 00 بدل علامة + في الأول (مثال: 0020101...)
+  if (digits.startsWith('00')) {
+    digits = digits.slice(2);
+  }
+
+  // الرقم مكتوب بالفعل بالصيغة الدولية (201012401365 - كود مصر 20 + رقم محلي بدون الصفر، 12 رقم بالظبط)
+  if (digits.startsWith('20') && digits.length === 12) {
+    return digits;
+  }
+
+  // الصيغة المحلية العادية (01012401365 أو حتى بدون الصفر) — نشيل أي أصفار في الأول ونضيف كود مصر
+  digits = digits.replace(/^0+/, '');
+  return digits ? `20${digits}` : '';
+}
+
+/**
  * بيحوّل payload الأوردر الخام اللي جاي من WooCommerce webhook لشكل مبسط
  * أسهل في الاستخدام في باقي السيستم.
  */
@@ -36,7 +61,10 @@ function normalizeWooOrderPayload(raw) {
   return {
     id: String(raw.id),
     customerName: `${billing.first_name || ''} ${billing.last_name || ''}`.trim() || 'عميلنا العزيز',
-    customerPhone: billing.phone || '',
+    // customerPhone دايمًا بالصيغة الدولية الكاملة — ده اللي بيتبعت بيه فعليًا على واتساب.
+    customerPhone: normalizeEgyptPhone(billing.phone),
+    // customerPhoneDisplay هو الرقم زي ما العميلة كتبته بالظبط — بيتعرض في نص الرسالة بس، مش بيتبعت بيه.
+    customerPhoneDisplay: billing.phone || '',
     shippingAddress: addressParts.join('، ') || 'مفيش عنوان مسجل',
     paymentMethod: raw.payment_method_title || raw.payment_method || 'غير محدد',
     total: raw.total,
@@ -85,6 +113,7 @@ async function updateOrderShippingAddress(orderId, addressLine) {
 
 module.exports = {
   isConfigured,
+  normalizeEgyptPhone,
   normalizeWooOrderPayload,
   updateOrderStatus,
   addOrderNote,
