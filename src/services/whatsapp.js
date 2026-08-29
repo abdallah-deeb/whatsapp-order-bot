@@ -46,6 +46,47 @@ async function sendViaWati(to, text) {
   return { ok: true, provider: 'wati', data: res.data };
 }
 
+/**
+ * بيبعت رسالة "قالب" (Template) معتمدة من ميتا مسبقًا — ده الشكل الوحيد المسموح
+ * بيه لأول رسالة بتتبعت لعميل جديد لسه ما كلمناهوش على واتساب (Business-Initiated).
+ * لازم القالب يكون معمول ومتوافق عليه في واتي (Campaigns > Template Messages) الأول.
+ *
+ * @param {string} to - رقم العميل بالصيغة الدولية
+ * @param {string} templateName - اسم القالب بالظبط زي ما هو مسجل في واتي (مثال: order_confirmation)
+ * @param {Array<{name: string, value: string}>} parameters - قيم المتغيرات بترتيبها ({{1}}, {{2}}, ...)
+ */
+async function sendViaWatiTemplate(to, templateName, parameters) {
+  const { apiEndpoint, accessToken } = config.wati;
+  if (!apiEndpoint || !accessToken) {
+    throw new Error('Wati غير مُعد: لازم WATI_API_ENDPOINT و WATI_ACCESS_TOKEN في .env');
+  }
+  const phone = to.replace(/^\+/, '');
+  const url = `${apiEndpoint}/api/v1/sendTemplateMessage`;
+  const res = await axios.post(
+    url,
+    {
+      template_name: templateName,
+      broadcast_name: templateName,
+      parameters,
+    },
+    {
+      params: { whatsappNumber: phone },
+      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    }
+  );
+  return { ok: true, provider: 'wati-template', data: res.data };
+}
+
+/**
+ * نقطة الدخول الموحدة لإرسال رسالة "قالب" — دلوقتي مفعّلة لواتي بس (المزود الوحيد الشغال فعليًا).
+ */
+async function sendTemplateMessage(to, templateName, parameters) {
+  if (config.whatsappProvider === 'wati') {
+    return sendViaWatiTemplate(to, templateName, parameters);
+  }
+  return sendViaMock(to, `[قالب: ${templateName}] ${JSON.stringify(parameters)}`);
+}
+
 async function sendViaMeta(to, text) {
   const { token, phoneNumberId } = config.meta;
   if (!token || !phoneNumberId) {
@@ -84,4 +125,4 @@ async function sendMessage(to, text) {
   }
 }
 
-module.exports = { sendMessage, outbox };
+module.exports = { sendMessage, sendTemplateMessage, outbox };
