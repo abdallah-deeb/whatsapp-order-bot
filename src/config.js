@@ -24,6 +24,12 @@ const config = {
     verifyToken: process.env.META_VERIFY_TOKEN || '',
   },
 
+  wati: {
+    // مثال: https://live-mt-server.wati.io/12345 (لاقيه في Wati > API Docs)
+    apiEndpoint: (process.env.WATI_API_ENDPOINT || '').replace(/\/$/, ''),
+    accessToken: process.env.WATI_ACCESS_TOKEN || '',
+  },
+
   anthropic: {
     apiKey: process.env.ANTHROPIC_API_KEY || '',
     model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-5',

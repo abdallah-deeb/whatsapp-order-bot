@@ -113,6 +113,22 @@ router.post('/twilio', async (req, res) => {
 });
 
 /**
+ * Webhook استقبال ردود Wati (بتاع BYOA - Bring Your Own AI Agent).
+ * حطه في Wati > Connect Custom AI Agents > Add Webhook، Event = "Assigned Message Received"
+ */
+router.post('/wati', async (req, res) => {
+  try {
+    const { text, waId, type } = req.body || {};
+    if (waId && text && type === 'text') {
+      await handleIncomingReply({ fromPhone: waId, text });
+    }
+  } catch (err) {
+    console.error('❌ خطأ في معالجة رد Wati:', err.message);
+  }
+  res.sendStatus(200);
+});
+
+/**
  * Webhook استقبال ردود Meta Cloud API.
  * الـ GET بيُستخدم مرة واحدة وقت ما بتربط الـ Webhook على Meta Developer Console (Verification).
  */

@@ -32,6 +32,20 @@ async function sendViaTwilio(to, text) {
   return { ok: true, provider: 'twilio', sid: res.data.sid };
 }
 
+async function sendViaWati(to, text) {
+  const { apiEndpoint, accessToken } = config.wati;
+  if (!apiEndpoint || !accessToken) {
+    throw new Error('Wati غير مُعد: لازم WATI_API_ENDPOINT و WATI_ACCESS_TOKEN في .env');
+  }
+  const phone = to.replace(/^\+/, '');
+  const url = `${apiEndpoint}/api/v1/sendSessionMessage/${phone}`;
+  const res = await axios.post(url, null, {
+    params: { messageText: text },
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  return { ok: true, provider: 'wati', data: res.data };
+}
+
 async function sendViaMeta(to, text) {
   const { token, phoneNumberId } = config.meta;
   if (!token || !phoneNumberId) {
@@ -62,6 +76,8 @@ async function sendMessage(to, text) {
       return sendViaTwilio(to, text);
     case 'meta':
       return sendViaMeta(to, text);
+    case 'wati':
+      return sendViaWati(to, text);
     case 'mock':
     default:
       return sendViaMock(to, text);
