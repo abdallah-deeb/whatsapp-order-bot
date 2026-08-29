@@ -32,11 +32,17 @@ router.post('/order-created', async (req, res) => {
 
   orderStore.saveOrder(order);
 
+  console.log(
+    `📦 أوردر جديد #${order.id} — هنبعت تأكيد واتساب لرقم ${order.customerPhone} (زي ما اتسجل: ${order.customerPhoneDisplay})`
+  );
+
   const message = templates.buildOrderConfirmationMessage(order);
   try {
-    await whatsapp.sendMessage(order.customerPhone, message);
+    const result = await whatsapp.sendMessage(order.customerPhone, message);
+    console.log(`✅ اتبعتت رسالة تأكيد الأوردر #${order.id} بنجاح عبر ${result.provider}`);
   } catch (err) {
-    console.error(`❌ فشل إرسال رسالة تأكيد الأوردر #${order.id}:`, err.message);
+    const details = err.response ? JSON.stringify(err.response.data) : err.message;
+    console.error(`❌ فشل إرسال رسالة تأكيد الأوردر #${order.id} لرقم ${order.customerPhone}:`, details);
     return res.status(200).json({ ok: false, error: 'send_failed' });
   }
 
