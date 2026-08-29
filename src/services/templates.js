@@ -25,7 +25,7 @@ function buildOrderConfirmationMessage(order) {
     `الإجمالي: ${formatCurrency(order.total, order.currency)}`,
     `طريقة الدفع: ${order.paymentMethod}`,
     `العنوان: ${order.shippingAddress}`,
-    `رقم التواصل: ${order.customerPhone}`,
+    `رقم التواصل: ${order.customerPhoneDisplay || order.customerPhone}`,
     '',
     'لو البيانات دي صح، رد بكلمة "تمام" أو "أيوه" وهنبدأ نجهز طلبك على طول.',
     'لو في حاجة غلط (العنوان، الرقم، أو حتى عايز تلغي الأوردر)، اكتبها لنا وهنظبطها.',
