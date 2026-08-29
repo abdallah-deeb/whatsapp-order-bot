@@ -13,7 +13,17 @@ function verifyWooSignature(req) {
     return true;
   }
   const signatureHeader = req.headers['x-wc-webhook-signature'];
-  if (!signatureHeader || !req.rawBody) return false;
+  if (!signatureHeader || !req.rawBody) {
+    console.warn(
+      '🔎 [DEBUG] الطلب وصل من غير توقيع أو من غير body — signatureHeader موجود؟',
+      !!signatureHeader,
+      '| rawBody موجود؟',
+      !!req.rawBody,
+      '| كل الهيدرز:',
+      JSON.stringify(req.headers)
+    );
+    return false;
+  }
 
   const expected = crypto.createHmac('sha256', secret).update(req.rawBody).digest('base64');
 
