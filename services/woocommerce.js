@@ -124,11 +124,74 @@ async function updateOrderShippingAddress(orderId, addressLine) {
   return { ok: true, data: res.data };
 }
 
+/**
+ * بيدور في أحدث أوردرات ووكومرس (آخر 3 أيام، أي حالة) عن أوردر رقم موبايله يطابق
+ * الرقم ده — مفيد جدًا لو البوت عمل restart (زي بعد أي تحديث/deploy على Render)
+ * وبالتالي فقد كل الأوردرات المحفوظة مؤقتًا في الذاكرة (orderStore).
+ *
+ * ⚠️ بنبحث في "أي حالة" (status=any) مش بس "قيد التنفيذ" — لأن أوردر ممكن تكون حالته
+ * اتغيّرت فعلاً (مثلاً لما العميلة تدوس زرار الواتساب في صفحة الشكر، البلاجين بيغيّر
+ * حالة الأوردر على طول لحالة تانية زي ما هي متحددة في الإعدادات)، فلو دورنا بس على
+ * "قيد التنفيذ" ممكن نفوّت أوردرات فعلية.
+ *
+ * من غير الدالة دي: أي عميلة بترد على واتساب بعد أي إعادة تشغيل للسيرفر (حتى لو أوردرها
+ * حديث جدًا) هتلاقي رسالة "مش لاقيين أوردر مرتبط بالرقم ده" غلط — وده بالظبط اللي حصل
+ * مع أوردر #34244.
+ */
+async function findRecentOrderByPhone(phone) {
+  if (!isConfigured()) {
+    console.warn('⚠️ [findRecentOrderByPhone] ووكومرس مش متوصل (متغيرات البيئة WOOCOMMERCE_* ناقصة) — مش هينفع ندور على الأوردر.');
+    return null;
+  }
+  const normalizedTarget = normalizeEgyptPhone(phone);
+  if (!normalizedTarget) return null;
+
+  console.log(`🔎 [findRecentOrderByPhone] بندور في ووكومرس عن أوردر لرقم ${normalizedTarget}...`);
+
+  try {
+    const res = await client().get('/orders', {
+      params: {
+        per_page: 50,
+        orderby: 'date',
+        order: 'desc',
+        status: 'any',
+      },
+    });
+
+    const threeDaysAgoMs = Date.now() - 3 * 24 * 60 * 60 * 1000;
+    // مش منطقي نربط رسالة عميلة بأوردر ملغي أو مرتجع أو فشل — دي حالات "ميتة" مش هيكمل فيها الاتفاق.
+    const deadStatuses = new Set(['cancelled', 'refunded', 'failed', 'trash']);
+
+    console.log(`🔎 [findRecentOrderByPhone] رجعلنا ${res.data.length} أوردر من ووكومرس، هنقارنهم بالرقم المطلوب.`);
+
+    for (const raw of res.data) {
+      if (deadStatuses.has(raw.status)) continue;
+
+      const orderTimeMs = new Date(raw.date_created).getTime();
+      if (Number.isFinite(orderTimeMs) && orderTimeMs < threeDaysAgoMs) continue;
+
+      const billingPhone = normalizeEgyptPhone(raw.billing && raw.billing.phone);
+      if (billingPhone && billingPhone === normalizedTarget) {
+        console.log(`✅ [findRecentOrderByPhone] لقينا تطابق: أوردر #${raw.id} (حالة: ${raw.status}, تليفون: ${billingPhone})`);
+        return normalizeWooOrderPayload(raw);
+      }
+    }
+
+    console.warn(`⚠️ [findRecentOrderByPhone] مفيش أي أوردر من الـ ${res.data.length} دول رقم تليفونه بيطابق ${normalizedTarget}.`);
+  } catch (err) {
+    const details = err.response ? `HTTP ${err.response.status}: ${JSON.stringify(err.response.data)}` : err.message;
+    console.warn('⚠️ [findRecentOrderByPhone] تعذّر البحث عن أوردر بالرقم في ووكومرس:', details);
+  }
+
+  return null;
+}
+
 module.exports = {
   isConfigured,
   normalizeEgyptPhone,
   normalizeWooOrderPayload,
   getOrder,
+  findRecentOrderByPhone,
   updateOrderStatus,
   addOrderNote,
   updateOrderShippingAddress,
