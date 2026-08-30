@@ -13,15 +13,35 @@ const router = express.Router();
 // عادي على نفس رقم الواتساب. شوفي wa_show_confirmation_popup() في whatsapp-order-confirmation.php.
 const CONFIRMATION_MESSAGE_MARKER = 'أريد تأكيد طلبي رقم';
 
+// نصوص الأزرار — ثابتة في مكان واحد عشان تتغيّر بسهولة، ومستخدمة في أكتر من مكان
+// (إرسال الزرار نفسه + التعرف على دوسته حتى لو وصلت كنص عادي).
+//
+// ⚠️ زرار العنوان: طلبتي "هضيف تفاصيل علي عنواني" بالظبط، لكن واتساب بيحدد أقصى
+// طول لنص الزرار بـ 20 حرف (طلبك كان 22 حرف) — لو بعتناه زي ما هو ممكن الرسالة
+// كلها ترفض من واتساب. عشان كده اختصرته لأقرب صيغة بنفس المعنى ("هضيف تفاصيل
+// عنواني" — 18 حرف) بدل ما أخاطر إن الزرار يوصلك مقطوع أو الرسالة توصلش خالص.
+const ADDRESS_BUTTON_LABEL = 'هضيف تفاصيل عنواني';
+const POLICY_BUTTON_LABEL = 'تمام';
+const OFFER_BUTTON_LABEL = 'هختار العرض';
+const NO_OFFER_BUTTON_LABEL = 'لا هأكد طلبي بس';
+
 // الرسالة الموحّدة اللي بتتبعت في أي حالة العميل يخرج فيها عن السكريبت المتوقع
 // (رد غريب، سؤال، رفض يبعت بيانات...) — بدل ما البوت يحاول "يفهم" أو يكرر
 // الطلب، بيسلّم المحادثة فورًا لفريق خدمة العملاء (اللي بيردوا من تطبيق واتساب
 // بيزنس نفسه) وبيقف تمامًا عن أي تدخل تاني في المحادثة دي.
 const HANDOFF_MESSAGE = 'تمام، هحول محادثتك لفريق خدمة العملاء وهيكملوا معاكِ حالًا 🙏';
 
+// الرسالة اللي بتتبعت لو العميلة اختارت "هختار العرض" — بتفضل بعدها في حالة
+// handed_off زي أي تحويل تاني (البوت بيسكت والفريق بيكمل معاها من واتساب
+// بيزنس مباشرة عشان يضيفوا المنتج)، بس النص هنا مخصوص لتذكيرها بالعرض والوقت.
+const OFFER_CHOSEN_MESSAGE = 'أنا في انتظارك 🌸 العرض متاح لمدة 15 دقيقة بس.';
+
+// الرسالة اللي بتتبعت لو العميلة اختارت تأكيد طلبها زي ما هو (من غير العرض).
+const ORDER_CONFIRMED_SHORT_MESSAGE = 'تم تأكيد طلبك بنجاح ✅ شكرًا لثقتك في Dolley Store 🌷';
+
 /**
  * بيتأكد إن الرد اللي وصل في مرحلة طلب العنوان فيه فعلاً بيانات عنوان حقيقي —
- * مش مجرد دوسة على زرار "تأكيد البيانات"، ومش رد قصير زي "تمام"، ومش جملة
+ * مش مجرد دوسة على زرار العنوان، ومش رد قصير زي "تمام"، ومش جملة
  * زي "أنا باعت العنوان مظبوط" (طويلة بس مفيهاش تفاصيل عنوان فعلي). عشان كده
  * بنشترط طول معقول *وكمان* وجود رقم واحد على الأقل (شارع/عمارة/شقة دايمًا
  * بيبقى فيها أرقام) — أي رد مايستوفيش الشرطين بيتحول لخدمة العملاء على طول.
@@ -29,7 +49,7 @@ const HANDOFF_MESSAGE = 'تمام، هحول محادثتك لفريق خدمة 
 function looksLikeRealAddress(text) {
   const trimmed = String(text || '').trim();
   if (!trimmed) return false;
-  if (trimmed === 'تأكيد البيانات') return false; // نص الزرار نفسه لوحده، مش عنوان حقيقي
+  if (trimmed === ADDRESS_BUTTON_LABEL) return false; // نص الزرار نفسه لوحده، مش عنوان حقيقي
   const hasDigit = /\d/.test(trimmed);
   return trimmed.length >= 15 && hasDigit;
 }
@@ -119,7 +139,7 @@ async function handleIncomingReply({ fromPhone, text }) {
       console.log(
         `👋 محادثة جديدة (من زرار البلاجين) مع رقم ${fromPhone}${convo.orderId ? ` — أوردر #${convo.orderId}` : ' — مقدرناش نلاقي رقم الأوردر في الرسالة'} — هنطلب العنوان.`
       );
-      await whatsapp.sendButtonMessage(fromPhone, await templates.buildAddressRequestMessage(), ['تأكيد البيانات']);
+      await whatsapp.sendButtonMessage(fromPhone, await templates.buildAddressRequestMessage(), [ADDRESS_BUTTON_LABEL]);
       return;
     }
     // نفس الأوردر ولسه المحادثة شغالة (مش متسلمة ولا مقفولة) — على الأغلب
@@ -147,7 +167,7 @@ async function handleIncomingReply({ fromPhone, text }) {
     convo.addressText = text;
     conversationStore.saveConversation(convo);
     console.log(`📍 استلمنا العنوان من رقم ${fromPhone} — هنبعت السياسة.`);
-    await whatsapp.sendButtonMessage(fromPhone, await templates.buildPolicyMessage(), ['موافق']);
+    await whatsapp.sendButtonMessage(fromPhone, await templates.buildPolicyMessage(), [POLICY_BUTTON_LABEL]);
     return;
   }
 
@@ -164,8 +184,8 @@ async function handleIncomingReply({ fromPhone, text }) {
     conversationStore.saveConversation(convo);
     console.log(`✅ رقم ${fromPhone} أكّد — هنبعت رسالة التأكيد والعرض.`);
     await whatsapp.sendButtonMessage(fromPhone, await templates.buildConfirmationOfferMessage(), [
-      'هختار العرض',
-      'لا هأكد طلبي بس',
+      OFFER_BUTTON_LABEL,
+      NO_OFFER_BUTTON_LABEL,
     ]);
     return;
   }
@@ -174,13 +194,13 @@ async function handleIncomingReply({ fromPhone, text }) {
   // أي رد غير "هختار العرض" بالتحديد بنعتبره العميلة عايزة طلبها زي ما هو.
   if (convo.state === 'confirmed') {
     const normalized = String(text || '').trim();
-    const choseOffer = normalized.includes('هختار العرض') || normalized.includes('اختار العرض');
+    const choseOffer = normalized.includes(OFFER_BUTTON_LABEL) || normalized.includes('اختار العرض');
 
     if (choseOffer) {
       convo.state = 'handed_off';
       conversationStore.saveConversation(convo);
       console.log(`🛍️ رقم ${fromPhone} اختار يستخدم العرض — تسليم فوري لخدمة العملاء يساعدوها تضيف المنتج.`);
-      await whatsapp.sendMessage(fromPhone, HANDOFF_MESSAGE);
+      await whatsapp.sendMessage(fromPhone, OFFER_CHOSEN_MESSAGE);
       return;
     }
 
@@ -188,10 +208,7 @@ async function handleIncomingReply({ fromPhone, text }) {
     convo.state = 'closed';
     conversationStore.saveConversation(convo);
     console.log(`✅ رقم ${fromPhone} عايز طلبه زي ما هو — هنأكد وهنحدث حالة الأوردر.`);
-    await whatsapp.sendMessage(
-      fromPhone,
-      'تمام، طلبك مؤكد نهائيًا ❤️ هيتجهز ويتشحن لحضرتك قريب. شكرًا لثقتك في Dolley Store 🌷'
-    );
+    await whatsapp.sendMessage(fromPhone, ORDER_CONFIRMED_SHORT_MESSAGE);
 
     if (convo.orderId) {
       try {
@@ -256,6 +273,36 @@ router.post('/twilio', async (req, res) => {
   res.send('<Response></Response>'); // نرجع رد فاضي، إحنا بنبعت الردود بنفسنا عبر sendMessage
 });
 
+// أسامي الأزرار المعروفة اللي البوت نفسه بيبعتها — بنستخدمها كخطة بديلة لو
+// شكل الـ payload بتاع دوسة الزرار من واتي مختلف عن اللي متوقعينه (مش موثّق
+// رسميًا من واتي، فبندور على أي حتة في الـ payload فيها نص زرار معروف).
+const KNOWN_BUTTON_LABELS = [ADDRESS_BUTTON_LABEL, POLICY_BUTTON_LABEL, OFFER_BUTTON_LABEL, NO_OFFER_BUTTON_LABEL];
+
+/**
+ * بتدور جوه أي object/array (شكل الـ payload) عن أول قيمة نصية بتطابق واحد من
+ * أسامي الأزرار المعروفة بالظبط — مهما كان اسم الحقل اللي هي متخبية جواه.
+ */
+function findKnownButtonLabel(value, depth = 0) {
+  if (depth > 6 || value == null) return null;
+  if (typeof value === 'string') {
+    return KNOWN_BUTTON_LABELS.includes(value.trim()) ? value.trim() : null;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findKnownButtonLabel(item, depth + 1);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (typeof value === 'object') {
+    for (const key of Object.keys(value)) {
+      const found = findKnownButtonLabel(value[key], depth + 1);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
 /**
  * Webhook استقبال ردود Wati (بتاع BYOA - Bring Your Own AI Agent).
  * حطه في Wati > Connect Custom AI Agents > Add Webhook، Event = "Assigned Message Received"
@@ -267,15 +314,23 @@ router.post('/wati', async (req, res) => {
 
     if (type === 'text' && text) {
       replyText = text;
-    } else if (type === 'button') {
-      // شكل الـ payload بالظبط لرد الزرار مش موثّق بالكامل من واتي رسميًا، فبندور
-      // في أكتر من مكان محتمل. لو مقدرناش نلاقي النص، بنسجل الـ payload كامل في
-      // اللوج عشان نشوف شكله الحقيقي ونظبط الكود على أساسه أول ما نشوف مثال حقيقي.
+    } else {
+      // مش رسالة نصية عادية — يبقى على الأغلب دوسة زرار (أو شكل تاني من واتي
+      // مش متعامل معاه لسه). شكل الـ payload بالظبط لرد الزرار مش موثّق من
+      // واتي رسميًا، فبندور الأول في أكتر الأماكن المحتملة، وبعدين كخطة أخيرة
+      // بندور في الـ payload كله عن أي نص بيطابق واحد من أسامي الأزرار المعروفة.
       const buttonData = interactiveButtonReply || buttonReply || req.body.button || null;
-      replyText = (buttonData && (buttonData.text || buttonData.title || buttonData.payload)) || null;
-      if (!replyText) {
-        console.warn('⚠️ استلمنا رد زرار من واتي بس مقدرناش نلاقي نص الزرار جواه — الـ payload كامل:', JSON.stringify(req.body));
-      }
+      replyText =
+        (buttonData && (buttonData.text || buttonData.title || buttonData.payload)) ||
+        findKnownButtonLabel(req.body) ||
+        null;
+
+      // بنسجل الـ payload كامل دايمًا في الحالة دي (لقينا نص الزرار أو لأ) —
+      // عشان لو فيه شكل تالت لسه مش متعامل معاه، نقدر نشوفه في اللوج ونضيفه.
+      console.log(
+        `🔎 [Wati] رسالة مش نوعها "text" وصلت (type: ${type}) — النص اللي لقيناه: ${replyText ? `"${replyText}"` : 'مفيش'} — الـ payload كامل:`,
+        JSON.stringify(req.body)
+      );
     }
 
     if (waId && replyText) {
