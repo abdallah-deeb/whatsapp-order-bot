@@ -4,6 +4,7 @@ const conversationStore = require('../services/conversationStore');
 const whatsapp = require('../services/whatsapp');
 const templates = require('../services/templates');
 const woocommerce = require('../services/woocommerce');
+const ai = require('../services/ai');
 
 const router = express.Router();
 
@@ -29,6 +30,15 @@ const ADDRESS_ALREADY_FINE_BUTTON_LABEL = 'كده تمام';
 const POLICY_BUTTON_LABEL = 'تمام';
 const OFFER_BUTTON_LABEL = 'هختار العرض';
 const NO_OFFER_BUTTON_LABEL = 'لا هأكد طلبي بس';
+
+// علامة مميزة بنحط بيها لوكيشن واتساب لما العميلة تبعته بدل ما تكتب العنوان —
+// بنحوّله لنص فيه رابط جوجل ماps، وبيتقبل كعنوان صحيح تلقائيًا (لوكيشن حقيقي
+// أدق من أي وصف نصي، ومفيدة جدًا للعميلة اللي مش عارفة توصف عنوانها).
+const LOCATION_ADDRESS_MARKER = '📍 لوكيشن واتساب:';
+
+function formatLocationAsAddressText(latitude, longitude) {
+  return `${LOCATION_ADDRESS_MARKER} https://www.google.com/maps?q=${latitude},${longitude}`;
+}
 
 // الرسالة الموحّدة اللي بتتبعت في أي حالة العميل يخرج فيها عن السكريبت المتوقع
 // (رد غريب، سؤال، رفض يبعت بيانات...) — بدل ما البوت يحاول "يفهم" أو يكرر
@@ -83,19 +93,58 @@ function scheduleAddressReminder(phone) {
   addressReminderTimers.set(phone, timer);
 }
 
+// كلمات بتدل على وصف عنوان مصري حقيقي حتى لو من غير رقم عمارة (عنوان مبني على
+// علامات مميزة بدل رقم — بيحصل أحيانًا). دي خطة بديلة بسيطة (من غير AI) —
+// مش هتكون دقيقة زي فهم المعنى الفعلي، لكنها أفضل من الاعتماد على رقم بس.
+const ADDRESS_DESCRIPTIVE_KEYWORDS = [
+  'شارع', 'عماره', 'عمارة', 'شقه', 'شقة', 'دور', 'منطقه', 'منطقة', 'ميدان',
+  'كوبري', 'كباري', 'جسر', 'بجوار', 'جنب', 'قدام', 'أمام', 'امام', 'خلف', 'ورا',
+  'مدخل', 'محافظه', 'محافظة', 'مركز', 'قريه', 'قرية', 'عزبه', 'عزبة', 'برج',
+  'كمبوند', 'فيلا', 'محطه', 'محطة', 'طريق', 'مساكن', 'حي ', 'نجع', 'ازبه',
+];
+
 /**
  * بيتأكد إن الرد اللي وصل في مرحلة طلب العنوان فيه فعلاً بيانات عنوان حقيقي —
  * مش مجرد دوسة على زرار، ومش رد قصير زي "تمام"، ومش جملة زي "أنا باعت العنوان
- * مظبوط" (طويلة بس مفيهاش تفاصيل عنوان فعلي). عشان كده بنشترط طول معقول
- * *وكمان* وجود رقم واحد على الأقل (شارع/عمارة/شقة دايمًا بيبقى فيها أرقام) —
- * أي رد مايستوفيش الشرطين بيتحول لخدمة العملاء على طول.
+ * مظبوط" (طويلة بس مفيهاش تفاصيل عنوان فعلي). دي خطة بديلة بتشتغل لما الـ AI
+ * (classifyAddressWithAI) مش متاح — بنقبل الرد في حالتين:
+ * 1. فيه رقم واحد على الأقل (شارع/عمارة/شقة دايمًا بيبقى فيها أرقام) وطوله
+ *    كفاية — ده أقوى إشارة.
+ * 2. من غير رقم، بس طويل بما يكفي وفيه كلمة وصفية معروفة (بجوار، خلف، ميدان...)
+ *    — عشان نقبل عنوان مبني على علامة مميزة بدل رقم عمارة.
+ * أي رد مايستوفيش أي شرط من دول بيتحول لخدمة العملاء على طول.
  */
 function looksLikeRealAddress(text) {
   const trimmed = String(text || '').trim();
   if (!trimmed) return false;
   if (trimmed === ADDRESS_WILL_TYPE_BUTTON_LABEL || trimmed === ADDRESS_ALREADY_FINE_BUTTON_LABEL) return false;
+
   const hasDigit = /\d/.test(trimmed);
-  return trimmed.length >= 15 && hasDigit;
+  if (hasDigit && trimmed.length >= 10) return true;
+
+  const hasAddressKeyword = ADDRESS_DESCRIPTIVE_KEYWORDS.some((w) => trimmed.includes(w));
+  if (hasAddressKeyword && trimmed.length >= 20) return true;
+
+  return false;
+}
+
+/**
+ * بتقرر هل الرد ده "عنوان حقيقي" ولا لأ — وده بيحصل على 3 مستويات بالترتيب:
+ * 1. لو لوكيشن واتساب فعلي (اللي البوت نفسه حوّله لنص فيه العلامة المميزة) →
+ *    مقبول تلقائيًا، لوكيشن حقيقي أدق من أي وصف.
+ * 2. غير كده، بنسأل الـ AI (لو متاح) يحكم هل ده وصف عنوان حقيقي كافي ولا لأ —
+ *    ده أدق من مجرد "فيه رقم وطول كافي" لأنه بيفهم المعنى مش بس الشكل.
+ * 3. لو الـ AI مش متاح (مفيش مفتاح Anthropic في الإعدادات) أو حصل خطأ/تأخير،
+ *    بنرجع لطريقة الطول+الرقم البسيطة (looksLikeRealAddress) بدل ما البوت يقف.
+ */
+async function isRealAddress(text) {
+  const trimmed = String(text || '').trim();
+  if (trimmed.startsWith(LOCATION_ADDRESS_MARKER)) return true;
+
+  const aiVerdict = await ai.classifyAddressWithAI(trimmed);
+  if (aiVerdict !== null) return aiVerdict;
+
+  return looksLikeRealAddress(trimmed);
 }
 
 /**
@@ -229,7 +278,7 @@ async function handleIncomingReply({ fromPhone, text }) {
       return;
     }
 
-    if (!looksLikeRealAddress(text)) {
+    if (!(await isRealAddress(text))) {
       clearAddressReminder(fromPhone);
       convo.state = 'handed_off';
       conversationStore.saveConversation(convo);
@@ -337,7 +386,11 @@ router.post('/test-incoming', async (req, res) => {
  */
 router.post('/twilio', async (req, res) => {
   const from = (req.body.From || '').replace('whatsapp:', '');
-  const text = req.body.Body || '';
+  // Twilio بيبعت اللوكيشن كإحداثيات مباشرة في الحقول دي بدل نص عادي.
+  let text = req.body.Body || '';
+  if (!text && req.body.Latitude && req.body.Longitude) {
+    text = formatLocationAsAddressText(req.body.Latitude, req.body.Longitude);
+  }
   if (from && text) {
     try {
       await handleIncomingReply({ fromPhone: from, text });
@@ -386,6 +439,28 @@ function findKnownButtonLabel(value, depth = 0) {
 }
 
 /**
+ * بتدور جوه أي object/array (شكل الـ payload) عن أول حتة فيها إحداثيات لوكيشن
+ * (latitude/longitude أو lat/lng) — مهما كان اسم الحقل اللي هي متخبية جواه،
+ * بالظبط زي findKnownButtonLabel لكن للوكيشن بدل نص الزرار.
+ */
+function findLocationInPayload(value, depth = 0) {
+  if (depth > 6 || value == null || typeof value !== 'object') return null;
+  if (!Array.isArray(value)) {
+    const latitude = typeof value.latitude === 'number' ? value.latitude : value.lat;
+    const longitude = typeof value.longitude === 'number' ? value.longitude : (value.lng ?? value.long);
+    if (typeof latitude === 'number' && typeof longitude === 'number') {
+      return { latitude, longitude };
+    }
+  }
+  const entries = Array.isArray(value) ? value : Object.values(value);
+  for (const item of entries) {
+    const found = findLocationInPayload(item, depth + 1);
+    if (found) return found;
+  }
+  return null;
+}
+
+/**
  * Webhook استقبال ردود Wati (بتاع BYOA - Bring Your Own AI Agent).
  * حطه في Wati > Connect Custom AI Agents > Add Webhook، Event = "Assigned Message Received"
  */
@@ -397,18 +472,25 @@ router.post('/wati', async (req, res) => {
     if (type === 'text' && text) {
       replyText = text;
     } else {
-      // مش رسالة نصية عادية — يبقى على الأغلب دوسة زرار (أو شكل تاني من واتي
-      // مش متعامل معاه لسه). شكل الـ payload بالظبط لرد الزرار مش موثّق من
-      // واتي رسميًا، فبندور الأول في أكتر الأماكن المحتملة، وبعدين كخطة أخيرة
-      // بندور في الـ payload كله عن أي نص بيطابق واحد من أسامي الأزرار المعروفة.
-      const buttonData = interactiveButtonReply || buttonReply || req.body.button || null;
-      replyText =
-        (buttonData && (buttonData.text || buttonData.title || buttonData.payload)) ||
-        findKnownButtonLabel(req.body) ||
-        null;
+      const location = findLocationInPayload(req.body);
 
-      // بنسجل الـ payload كامل دايمًا في الحالة دي (لقينا نص الزرار أو لأ) —
-      // عشان لو فيه شكل تالت لسه مش متعامل معاه، نقدر نشوفه في اللوج ونضيفه.
+      if (location) {
+        replyText = formatLocationAsAddressText(location.latitude, location.longitude);
+        console.log(`📍 [Wati] استلمنا لوكيشن من رقم ${waId}: ${location.latitude}, ${location.longitude}`);
+      } else {
+        // مش رسالة نصية ولا لوكيشن — يبقى على الأغلب دوسة زرار (أو شكل تاني من
+        // واتي مش متعامل معاه لسه). شكل الـ payload بالظبط لرد الزرار مش موثّق
+        // من واتي رسميًا، فبندور الأول في أكتر الأماكن المحتملة، وبعدين كخطة
+        // أخيرة بندور في الـ payload كله عن أي نص بيطابق واحد من أسامي الأزرار.
+        const buttonData = interactiveButtonReply || buttonReply || req.body.button || null;
+        replyText =
+          (buttonData && (buttonData.text || buttonData.title || buttonData.payload)) ||
+          findKnownButtonLabel(req.body) ||
+          null;
+      }
+
+      // بنسجل الـ payload كامل دايمًا في الحالة دي (لقينا رد أو لأ) — عشان لو
+      // فيه شكل تالت لسه مش متعامل معاه، نقدر نشوفه في اللوج ونضيفه.
       console.log(
         `🔎 [Wati] رسالة مش نوعها "text" وصلت (type: ${type}) — النص اللي لقيناه: ${replyText ? `"${replyText}"` : 'مفيش'} — الـ payload كامل:`,
         JSON.stringify(req.body)
