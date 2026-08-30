@@ -21,7 +21,22 @@ const router = express.Router();
  *    بالـ AI (تأكيد/إلغاء/تعديل) ونتصرف على أساسه.
  */
 async function handleIncomingReply({ fromPhone, text }) {
-  const order = orderStore.findPendingOrderByPhone(fromPhone);
+  let order = orderStore.findPendingOrderByPhone(fromPhone);
+
+  // لو مش لاقيينه في الذاكرة، ده مش معناه إن الأوردر مش موجود — ممكن يكون السيرفر عمل
+  // restart (زي بعد أي تحديث على Render) وفقد كل اللي كان محفوظ مؤقتًا في الذاكرة.
+  // قبل ما نرفض رسالة العميلة، ندور على الأوردر مباشرة في ووكومرس نفسه.
+  if (!order) {
+    try {
+      order = await woocommerce.findRecentOrderByPhone(fromPhone);
+      if (order) {
+        orderStore.saveOrder(order);
+        console.log(`♻️ لقينا الأوردر #${order.id} في ووكومرس مباشرة (مكنش محفوظ في الذاكرة) وربطناه بالرقم ${fromPhone}`);
+      }
+    } catch (err) {
+      console.warn('⚠️ خطأ أثناء البحث عن الأوردر في ووكومرس كخطة بديلة:', err.message);
+    }
+  }
 
   if (!order) {
     console.log(`ℹ️ رسالة من رقم ${fromPhone} مش مرتبطة بأي أوردر معروف: "${text}"`);
