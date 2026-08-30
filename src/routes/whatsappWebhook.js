@@ -56,10 +56,10 @@ const ORDER_CONFIRMED_SHORT_MESSAGE = 'تم تأكيد طلبك بنجاح ✅ �
 
 // لما العميلة تدوس "هضيف تفاصيل عنواني"، البوت ماينفعش يعتبر الدوسة دي نفسها
 // "رد مش واضح" ويسلّم على طول — لازم يستنى فعليًا لحد ما تكتب العنوان. بنبعتلها
-// رسالة استنى، ولو مبعتتش حاجة خلال دقيقة، بنفكّرها مرة واحدة بس.
+// رسالة استنى، ولو مبعتتش حاجة خلال 5 دقايق، بنفكّرها مرة واحدة بس.
 const ADDRESS_WAITING_MESSAGE = 'تمام، أنا في انتظارك 🌸';
 const ADDRESS_REMINDER_MESSAGE = 'لسه مستنينك تبعتيلي العنوان بالتفصيل 📍 فين العنوان؟';
-const ADDRESS_REMINDER_DELAY_MS = 60 * 1000; // دقيقة واحدة
+const ADDRESS_REMINDER_DELAY_MS = 5 * 60 * 1000; // 5 دقايق
 
 // تايمرات التذكير دي في الذاكرة بس (زي كل حاجة تانية في المشروع ده) — بتتصفر
 // لو السيرفر عمل restart، وده مقبول: أسوأ حاجة ممكن تحصل إن العميلة ماتوصلهاش
@@ -79,10 +79,10 @@ function scheduleAddressReminder(phone) {
   const timer = setTimeout(async () => {
     addressReminderTimers.delete(phone);
     // نتأكد إن المحادثة لسه في نفس المرحلة قبل ما نبعت التذكير — لو العميلة
-    // بعتت العنوان أو خرجت عن السكريبت في الدقيقة دي، التذكير مبقاش له لازمة.
+    // بعتت العنوان أو خرجت عن السكريبت في المدة دي، التذكير مبقاش له لازمة.
     const latestConvo = conversationStore.getConversation(phone);
     if (latestConvo && latestConvo.state === 'awaiting_address') {
-      console.log(`⏰ مرّت دقيقة من غير ما رقم ${phone} يبعت العنوان — هنبعتله تذكير.`);
+      console.log(`⏰ مرّت 5 دقايق من غير ما رقم ${phone} يبعت العنوان — هنبعتله تذكير.`);
       try {
         await whatsapp.sendMessage(phone, ADDRESS_REMINDER_MESSAGE);
       } catch (err) {
@@ -141,8 +141,17 @@ async function isRealAddress(text) {
   const trimmed = String(text || '').trim();
   if (trimmed.startsWith(LOCATION_ADDRESS_MARKER)) return true;
 
-  const aiVerdict = await ai.classifyAddressWithAI(trimmed);
-  if (aiVerdict !== null) return aiVerdict;
+  // أي مشكلة هنا (مفتاح مش متسجل، خطأ شبكة، أو حتى ملف ai.js نسخة قديمة
+  // مفيهاش الدالة دي أصلاً) لازم ترجع لطريقة الطول+الرقم البديلة، مش توقف
+  // البوت عن الرد للعميلة خالص — عشان كده الاستدعاء ده محوّط بـ try/catch.
+  try {
+    if (typeof ai.classifyAddressWithAI === 'function') {
+      const aiVerdict = await ai.classifyAddressWithAI(trimmed);
+      if (aiVerdict !== null) return aiVerdict;
+    }
+  } catch (err) {
+    console.warn('⚠️ فشل تصنيف العنوان بالـ AI (هنرجع للطريقة البديلة):', err.message);
+  }
 
   return looksLikeRealAddress(trimmed);
 }
@@ -194,7 +203,7 @@ function extractOrderIdFromMarkerMessage(text) {
  * 2. awaiting_address → لازم عنوان حقيقي (طول كافي + فيه رقم). دوسة "كده تمام"
  *    → تسليم فوري لخدمة العملاء يراجعوا العنوان المسجل يدويًا. دوسة "هضيف
  *    تفاصيل عنواني" → مش تسليم، البوت بيستنى فعليًا ويفكّرها مرة واحدة لو
- *    مرت دقيقة من غير رد. أي رد تاني مش عنوان حقيقي (رفض، "أنا باعت العنوان
+ *    مرت 5 دقايق من غير رد. أي رد تاني مش عنوان حقيقي (رفض، "أنا باعت العنوان
  *    مظبوط"، سؤال...) → تسليم فوري لخدمة العملاء (handed_off). لما يوصل عنوان
  *    فعلي، بنبعت السياسة (مع زرار "تمام")، ونحول الحالة لـ awaiting_final_confirmation.
  * 3. awaiting_final_confirmation → لازم موافقة واضحة ("موافق"/"تمام"...، أو
@@ -270,7 +279,7 @@ async function handleIncomingReply({ fromPhone, text }) {
 
     // "هضيف تفاصيل عنواني" = العميلة هتكتب العنوان دلوقتي — ده مش رد خارج عن
     // السكريبت، ده بالظبط المتوقع منها. مايتسلّمش لخدمة العملاء؛ البوت بيستنى
-    // فعليًا، وبيفكّرها مرة واحدة لو مرت دقيقة من غير ما تبعت حاجة.
+    // فعليًا، وبيفكّرها مرة واحدة لو مرت 5 دقايق من غير ما تبعت حاجة.
     if (trimmedReply === ADDRESS_WILL_TYPE_BUTTON_LABEL) {
       console.log(`⏳ رقم ${fromPhone} هيبعت العنوان دلوقتي — هنستناه ونفكّره لو اتأخر.`);
       await whatsapp.sendMessage(fromPhone, ADDRESS_WAITING_MESSAGE);

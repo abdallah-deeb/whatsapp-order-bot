@@ -73,6 +73,51 @@ function heuristicInterpret(message) {
   return { intent: 'unclear', correctedAddress: null, note: null, suggestedReply: null };
 }
 
+// تصنيف بسيط بالـ AI: هل رد العميل في مرحلة طلب العنوان فيه فعلاً تفاصيل عنوان
+// شحن حقيقية وكافية، ولا لأ؟ ده أدق بكتير من مجرد "فيه رقم وطول كافي" (اللي ممكن
+// يرفض عنوان حقيقي مبني على علامات مميزة من غير رقم عمارة، أو يقبل جملة طويلة
+// فاضية من التفاصيل).
+const ADDRESS_CLASSIFIER_SYSTEM_PROMPT = `أنت أداة تصنيف بسيطة لمتجر إلكتروني مصري على واتساب.
+هتقرا رد عميل بعتوه لما اتطلب منه يبعت عنوان الشحن بالتفصيل (شارع/عمارة/شقة/منطقة/علامة مميزة).
+مهمتك الوحيدة: تحدد هل الرد ده فيه فعلاً تفاصيل عنوان شحن حقيقية وكافية عشان مندوب التوصيل يقدر يوصل بيها، ولا لأ؟
+أمثلة على "لأ": رفض إرسال العنوان، ادّعاء إن العنوان "مبعوت قبل كده" من غير أي تفاصيل فعلية، سؤال عن حاجة تانية، كلام عام مالوش علاقة بعنوان، نص عشوائي أو قصير جدًا مالوش معنى واضح.
+رد بكلمة واحدة بس: YES أو NO. من غير أي شرح أو علامات ترقيم زيادة.`;
+
+/**
+ * بتحاول تصنّف رد العميل بالـ AI. بترجع true/false لو الـ AI رد برد واضح،
+ * أو null لو مفيش مفتاح Anthropic متسجل، أو الطلب فشل/طوّل، أو الرد مكانش
+ * واضح — في كل الحالات دي اللي بينادي على الدالة هو اللي بيقرر يرجع لخطة
+ * بديلة (heuristic) بدل ما يوقف البوت عن الرد خالص.
+ */
+async function classifyAddressWithAI(text) {
+  const client = getClient();
+  if (!client) return null;
+
+  const trimmed = String(text || '').trim();
+  if (!trimmed) return false;
+
+  try {
+    const response = await Promise.race([
+      client.messages.create({
+        model: config.anthropic.model,
+        max_tokens: 5,
+        system: ADDRESS_CLASSIFIER_SYSTEM_PROMPT,
+        messages: [{ role: 'user', content: trimmed.slice(0, 1000) }],
+      }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('AI classify timeout')), 8000)),
+    ]);
+
+    const raw = (response.content?.[0]?.type === 'text' ? response.content[0].text : '').trim().toUpperCase();
+    if (raw.startsWith('YES')) return true;
+    if (raw.startsWith('NO')) return false;
+    console.warn('⚠️ الـ AI رجّع رد غير متوقع في تصنيف العنوان، هنرجع للطريقة البديلة:', raw);
+    return null;
+  } catch (err) {
+    console.warn('⚠️ فشل تصنيف العنوان بالـ AI (أو استغرق وقت طويل)، هنرجع للطريقة البديلة:', err.message);
+    return null;
+  }
+}
+
 async function interpretCustomerReply({ order, message }) {
   const client = getClient();
 
@@ -129,4 +174,4 @@ function suggestCrossSell(order) {
   return match ? { name: match.name, reason: match.reason } : null;
 }
 
-module.exports = { interpretCustomerReply, suggestCrossSell };
+module.exports = { interpretCustomerReply, suggestCrossSell, classifyAddressWithAI };
