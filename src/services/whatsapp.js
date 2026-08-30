@@ -87,6 +87,50 @@ async function sendTemplateMessage(to, templateName, parameters) {
   return sendViaMock(to, `[قالب: ${templateName}] ${JSON.stringify(parameters)}`);
 }
 
+/**
+ * بيبعت رسالة "session" عادية (نفس شروط sendMessage) لكن مع أزرار رد سريعة تحتها
+ * (لحد 3 أزرار، كل زرار نصه أقصى حاجة 20 حرف تقريبًا — قيود واتساب نفسه).
+ * لو العميل داس على زرار، بيوصلنا ردّه بنفس شكل أي رسالة نصية عادية (شايفينه في
+ * أول if جوه /wati تحت — بندور على نص الزرار في أكتر من مكان محتمل في الـ payload
+ * لأن واتي مش موثقة توثيق كامل لشكله بالظبط).
+ *
+ * لو العميل كتب رد عادي بدل ما يدوس زرار، البوت برضه بيستقبله ويكمل عادي —
+ * الأزرار دي بس تسهيل شكلي، مش بتلغي إمكانية الكتابة اليدوية.
+ */
+async function sendViaWatiButtons(to, body, buttons, { header, footer } = {}) {
+  const { apiEndpoint, accessToken } = config.wati;
+  if (!apiEndpoint || !accessToken) {
+    throw new Error('Wati غير مُعد: لازم WATI_API_ENDPOINT و WATI_ACCESS_TOKEN في .env');
+  }
+  const phone = to.replace(/^\+/, '');
+  const url = `${apiEndpoint}/api/v1/sendInteractiveButtonsMessage`;
+  const payload = {
+    body,
+    buttons: buttons.map((text) => ({ text })),
+  };
+  if (header) payload.header = { type: 'Text', text: header };
+  if (footer) payload.footer = footer;
+
+  const res = await axios.post(url, payload, {
+    params: { whatsappNumber: phone },
+    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+  });
+  return { ok: true, provider: 'wati-buttons', data: res.data };
+}
+
+/**
+ * نقطة الدخول الموحدة لإرسال رسالة بأزرار — دلوقتي مفعّلة لواتي بس.
+ * في أي وضع تاني (mock مثلاً) بنكتفي بإضافة أسامي الأزرار في آخر النص، عشان
+ * التجربة المحلية تفضل شغالة من غير ما تحتاج حساب واتي فعلي.
+ */
+async function sendButtonMessage(to, body, buttons) {
+  if (config.whatsappProvider === 'wati') {
+    return sendViaWatiButtons(to, body, buttons);
+  }
+  const hint = buttons && buttons.length ? `\n\n(${buttons.join(' / ')})` : '';
+  return sendViaMock(to, `${body}${hint}`);
+}
+
 async function sendViaMeta(to, text) {
   const { token, phoneNumberId } = config.meta;
   if (!token || !phoneNumberId) {
@@ -125,4 +169,4 @@ async function sendMessage(to, text) {
   }
 }
 
-module.exports = { sendMessage, sendTemplateMessage, outbox };
+module.exports = { sendMessage, sendTemplateMessage, sendButtonMessage, outbox };

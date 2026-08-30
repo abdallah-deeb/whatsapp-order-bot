@@ -3,6 +3,7 @@ const config = require('../config');
 const conversationStore = require('../services/conversationStore');
 const whatsapp = require('../services/whatsapp');
 const templates = require('../services/templates');
+const woocommerce = require('../services/woocommerce');
 
 const router = express.Router();
 
@@ -12,24 +13,86 @@ const router = express.Router();
 // عادي على نفس رقم الواتساب. شوفي wa_show_confirmation_popup() في whatsapp-order-confirmation.php.
 const CONFIRMATION_MESSAGE_MARKER = 'أريد تأكيد طلبي رقم';
 
+// الرسالة الموحّدة اللي بتتبعت في أي حالة العميل يخرج فيها عن السكريبت المتوقع
+// (رد غريب، سؤال، رفض يبعت بيانات...) — بدل ما البوت يحاول "يفهم" أو يكرر
+// الطلب، بيسلّم المحادثة فورًا لفريق خدمة العملاء (اللي بيردوا من تطبيق واتساب
+// بيزنس نفسه) وبيقف تمامًا عن أي تدخل تاني في المحادثة دي.
+const HANDOFF_MESSAGE = 'تمام، هحول محادثتك لفريق خدمة العملاء وهيكملوا معاكِ حالًا 🙏';
+
+/**
+ * بيتأكد إن الرد اللي وصل في مرحلة طلب العنوان فيه فعلاً بيانات عنوان حقيقي —
+ * مش مجرد دوسة على زرار "تأكيد البيانات"، ومش رد قصير زي "تمام"، ومش جملة
+ * زي "أنا باعت العنوان مظبوط" (طويلة بس مفيهاش تفاصيل عنوان فعلي). عشان كده
+ * بنشترط طول معقول *وكمان* وجود رقم واحد على الأقل (شارع/عمارة/شقة دايمًا
+ * بيبقى فيها أرقام) — أي رد مايستوفيش الشرطين بيتحول لخدمة العملاء على طول.
+ */
+function looksLikeRealAddress(text) {
+  const trimmed = String(text || '').trim();
+  if (!trimmed) return false;
+  if (trimmed === 'تأكيد البيانات') return false; // نص الزرار نفسه لوحده، مش عنوان حقيقي
+  const hasDigit = /\d/.test(trimmed);
+  return trimmed.length >= 15 && hasDigit;
+}
+
+/**
+ * بيتأكد إن الرد اللي وصل بعد رسالة السياسة فعلاً بيقصد "موافقة" (كتابة أو
+ * دوسة زرار "موافق")، مش أي رد عشوائي — عشان محدش يعدي المرحلة دي من غير ما
+ * يوافق فعليًا على السياسة.
+ */
+function looksLikeConfirmation(text) {
+  const normalized = String(text || '').trim();
+  if (!normalized) return false;
+  // لو الرد فيه كلمة نفي ("مش تمام"، "لأ") مايتحسبش موافقة حتى لو فيه
+  // كلمة موافقة جواه — عشان نفضل في الجانب الآمن (تسليم لخدمة العملاء)
+  // بدل ما نفهم رد غلط على إنه موافقة.
+  const negationWords = ['مش', 'لأ', 'مو ', 'رافض', 'معترض'];
+  if (negationWords.some((w) => normalized.includes(w))) return false;
+  const confirmWords = ['موافق', 'تمام', 'ايوه', 'أيوه', 'اه', 'آه', 'ok', 'okay', 'yes'];
+  return confirmWords.some((w) => normalized.includes(w));
+}
+
+/**
+ * بيطلع رقم الأوردر من نص رسالة العلامة المميزة نفسها (اللي بلاجين ووردبريس
+ * بيحطه فيها: "أريد تأكيد طلبي رقم: 12345") — مش بندور عليه في ووكومرس ولا
+ * بنعتمد عليه في أي حاجة أثناء المحادثة، بس بنحتفظ بيه عشان نقدر نحدّث حالة
+ * الأوردر ده بالتحديد في اللحظة اللي العميلة تأكد فيها إنها عايزة طلبها زي ما هو.
+ */
+function extractOrderIdFromMarkerMessage(text) {
+  const match = String(text || '').match(/أريد تأكيد طلبي رقم:?\s*#?(\d+)/);
+  return match ? match[1] : null;
+}
+
 /**
  * القلب النابض للبوت: بييجي هنا أي رد من العميل (من أي مزود)، وبيتحرك حسب مرحلة
- * محادثته على واتساب (convo.state) — من غير أي حاجة مرتبطة برقم أوردر معيّن أو
- * تحديث على ووكومرس. البوت بس بيمشي في السكريبت المتفق عليه ويستنى رد العميل
- * في كل مرحلة:
+ * محادثته على واتساب (convo.state). البوت بيمشي في سكريبت بسيط وصارم: أي رد
+ * مش واضح أو خارج عن المتوقع في أي مرحلة (ما عدا المرحلة الأخيرة) → البوت بيوقف
+ * فورًا ويسلّم المحادثة لفريق خدمة العملاء (state = handed_off)، ومايتدخلش تاني
+ * خالص في المحادثة دي — الفريق بيكمل بنفسه من تطبيق واتساب بيزنس مباشرة.
+ * مفيش أي حاجة عن الأوردر بتتحدث على ووكومرس إلا في حالة واحدة بس: لما العميلة
+ * تأكد إنها عايزة طلبها زي ما هو في آخر خطوة.
  *
  * 0. مفيش محادثة متسجلة للرقم ده لسه، والرسالة مش رسالة تأكيد الأوردر الجاهزة من
  *    البلاجين (مفيهاش "أريد تأكيد طلبي رقم") → دي مش عميلة داخلة من زرار الشكر،
  *    ممكن تكون أي حد بيكتب على رقم الواتساب — البوت ماينفعش يرد عليها، بنتجاهلها.
  * 1. مفيش محادثة متسجلة للرقم ده لسه، والرسالة فيها العلامة المميزة دي → دي فعلاً
- *    عميلة داخلة من زرار الواتساب في صفحة الشكر — بنرد نطلب العنوان بالتفصيل ورقم
- *    تواصل إضافي، ونبدأ محادثة جديدة بحالة awaiting_address.
- * 2. awaiting_address → العميل بعت العنوان بالتفصيل — بنبعت سياسة الاستبدال/
- *    الاسترجاع والمعاينة، ونحول الحالة لـ awaiting_final_confirmation.
- * 3. awaiting_final_confirmation → أي رد من العميل هنا بنعتبره تأكيد (زي ما هو
- *    متفق عليه: "لو موافقة على كل حاجة ردي بكلمة تمام") — بنبعت رسالة التأكيد
- *    والعرض، ونحول الحالة لـ confirmed.
- * 4. confirmed (أو أي حاجة بعد كده) → رد بسيط بس، مفيش سكريبت تاني.
+ *    عميلة داخلة من زرار الواتساب في صفحة الشكر — بنطلع رقم الأوردر من نص الرسالة
+ *    نفسها (لو موجود)، ونرد نطلب العنوان بالتفصيل (مع زرار "تأكيد البيانات")،
+ *    ونبدأ محادثة جديدة بحالة awaiting_address.
+ * 2. awaiting_address → لازم عنوان حقيقي (طول كافي + فيه رقم). أي رد تاني (رفض،
+ *    "أنا باعت العنوان مظبوط"، سؤال...) → تسليم فوري لخدمة العملاء (handed_off).
+ *    لما يوصل عنوان فعلي، بنبعت السياسة (مع زرار "موافق")، ونحول الحالة
+ *    لـ awaiting_final_confirmation.
+ * 3. awaiting_final_confirmation → لازم موافقة واضحة ("موافق"/"تمام"...، أو
+ *    دوسة الزرار). أي رد تاني (سؤال عن السياسة، رفض...) → تسليم فوري لخدمة
+ *    العملاء (handed_off). لما توصل الموافقة، بنبعت رسالة التأكيد والعرض (مع
+ *    زرارين: "هختار العرض" / "لا هأكد طلبي بس")، ونحول الحالة لـ confirmed.
+ * 4. confirmed → آخر مرحلة، مبتوقفش وتستنى صيغة معينة: لو اختارت "هختار العرض"
+ *    → تسليم لخدمة العملاء يساعدوها تضيف المنتج (handed_off). أي رد تاني → عايزة
+ *    طلبها زي ما هو: تأكيد نهائي + تحديث حالة الأوردر على ووكومرس لـ "تم
+ *    التفعيل بواسطة البوت"، وتقفل المحادثة (closed).
+ * 5. handed_off → البوت بيتوقف تمامًا، مايردش خالص — الفريق هو اللي بيكمل من
+ *    تطبيق واتساب بيزنس مباشرة.
+ * 6. closed (أو أي حاجة بعد كده) → رد بسيط بس، مفيش سكريبت تاني.
  */
 async function handleIncomingReply({ fromPhone, text }) {
   let convo = conversationStore.getConversation(fromPhone);
@@ -42,29 +105,95 @@ async function handleIncomingReply({ fromPhone, text }) {
       return;
     }
     convo = conversationStore.startConversation(fromPhone);
-    console.log(`👋 محادثة جديدة (من زرار البلاجين) مع رقم ${fromPhone} — هنطلب العنوان.`);
-    await whatsapp.sendMessage(fromPhone, await templates.buildAddressRequestMessage());
+    convo.orderId = extractOrderIdFromMarkerMessage(text);
+    conversationStore.saveConversation(convo);
+    console.log(
+      `👋 محادثة جديدة (من زرار البلاجين) مع رقم ${fromPhone}${convo.orderId ? ` — أوردر #${convo.orderId}` : ' — مقدرناش نلاقي رقم الأوردر في الرسالة'} — هنطلب العنوان.`
+    );
+    await whatsapp.sendButtonMessage(fromPhone, await templates.buildAddressRequestMessage(), ['تأكيد البيانات']);
     return;
   }
 
   if (convo.state === 'awaiting_address') {
+    if (!looksLikeRealAddress(text)) {
+      convo.state = 'handed_off';
+      conversationStore.saveConversation(convo);
+      console.log(`⚠️ رقم ${fromPhone} خرج عن السكريبت في مرحلة العنوان (رد: "${text}") — تسليم فوري لخدمة العملاء.`);
+      await whatsapp.sendMessage(fromPhone, HANDOFF_MESSAGE);
+      return;
+    }
+
     convo.state = 'awaiting_final_confirmation';
     convo.addressText = text;
     conversationStore.saveConversation(convo);
     console.log(`📍 استلمنا العنوان من رقم ${fromPhone} — هنبعت السياسة.`);
-    await whatsapp.sendMessage(fromPhone, await templates.buildPolicyMessage());
+    await whatsapp.sendButtonMessage(fromPhone, await templates.buildPolicyMessage(), ['موافق']);
     return;
   }
 
   if (convo.state === 'awaiting_final_confirmation') {
+    if (!looksLikeConfirmation(text)) {
+      convo.state = 'handed_off';
+      conversationStore.saveConversation(convo);
+      console.log(`⚠️ رقم ${fromPhone} خرج عن السكريبت في مرحلة السياسة (رد: "${text}") — تسليم فوري لخدمة العملاء.`);
+      await whatsapp.sendMessage(fromPhone, HANDOFF_MESSAGE);
+      return;
+    }
+
     convo.state = 'confirmed';
     conversationStore.saveConversation(convo);
     console.log(`✅ رقم ${fromPhone} أكّد — هنبعت رسالة التأكيد والعرض.`);
-    await whatsapp.sendMessage(fromPhone, await templates.buildConfirmationOfferMessage());
+    await whatsapp.sendButtonMessage(fromPhone, await templates.buildConfirmationOfferMessage(), [
+      'هختار العرض',
+      'لا هأكد طلبي بس',
+    ]);
     return;
   }
 
-  // بعد التأكيد، أي رسالة تانية بترجع رد بسيط بس — مفيش سكريبت تاني بعد كده.
+  // آخر مرحلة في السكريبت — عكس المراحل اللي فاتت، هنا مش بنستنى صيغة رد معينة:
+  // أي رد غير "هختار العرض" بالتحديد بنعتبره العميلة عايزة طلبها زي ما هو.
+  if (convo.state === 'confirmed') {
+    const normalized = String(text || '').trim();
+    const choseOffer = normalized.includes('هختار العرض') || normalized.includes('اختار العرض');
+
+    if (choseOffer) {
+      convo.state = 'handed_off';
+      conversationStore.saveConversation(convo);
+      console.log(`🛍️ رقم ${fromPhone} اختار يستخدم العرض — تسليم فوري لخدمة العملاء يساعدوها تضيف المنتج.`);
+      await whatsapp.sendMessage(fromPhone, HANDOFF_MESSAGE);
+      return;
+    }
+
+    // أي رد تاني (زي "لا هأكد طلبي بس" أو أي حاجة تانية) = عايزة طلبها زي ما هو.
+    convo.state = 'closed';
+    conversationStore.saveConversation(convo);
+    console.log(`✅ رقم ${fromPhone} عايز طلبه زي ما هو — هنأكد وهنحدث حالة الأوردر.`);
+    await whatsapp.sendMessage(
+      fromPhone,
+      'تمام، طلبك مؤكد نهائيًا ❤️ هيتجهز ويتشحن لحضرتك قريب. شكرًا لثقتك في Dolley Store 🌷'
+    );
+
+    if (convo.orderId) {
+      try {
+        await woocommerce.updateOrderStatus(convo.orderId, 'bot-confirmed');
+        console.log(`✅ أوردر #${convo.orderId} اتحدثت حالته لـ "تم التفعيل بواسطة البوت".`);
+      } catch (err) {
+        console.error(`❌ فشل تحديث حالة الأوردر #${convo.orderId} لـ "تم التفعيل بواسطة البوت":`, err.message);
+      }
+    } else {
+      console.warn(`⚠️ مقدرناش نحدد رقم الأوردر لرقم ${fromPhone} من رسالة البداية — مش هينفع نحدث حالته على ووكومرس.`);
+    }
+    return;
+  }
+
+  // اتسلّمت لخدمة العملاء بالفعل — البوت بيتوقف تمامًا ومايردش خالص، عشان
+  // مايتعارضش مع رد الموظفة اللي هتكمل المحادثة بنفسها من التطبيق.
+  if (convo.state === 'handed_off') {
+    console.log(`🤝 رقم ${fromPhone} في محادثة متسلّمة لخدمة العملاء بالفعل — البوت مش هيرد.`);
+    return;
+  }
+
+  // بعد إقفال المحادثة (closed)، أي رسالة تانية بترجع رد بسيط بس.
   await whatsapp.sendMessage(
     fromPhone,
     'تمام، وصلتنا رسالتك ❤️ حد من فريقنا هيتابع معاك لو محتاجة أي حاجة تانية.'
@@ -113,9 +242,24 @@ router.post('/twilio', async (req, res) => {
  */
 router.post('/wati', async (req, res) => {
   try {
-    const { text, waId, type } = req.body || {};
-    if (waId && text && type === 'text') {
-      await handleIncomingReply({ fromPhone: waId, text });
+    const { text, waId, type, interactiveButtonReply, buttonReply } = req.body || {};
+    let replyText = null;
+
+    if (type === 'text' && text) {
+      replyText = text;
+    } else if (type === 'button') {
+      // شكل الـ payload بالظبط لرد الزرار مش موثّق بالكامل من واتي رسميًا، فبندور
+      // في أكتر من مكان محتمل. لو مقدرناش نلاقي النص، بنسجل الـ payload كامل في
+      // اللوج عشان نشوف شكله الحقيقي ونظبط الكود على أساسه أول ما نشوف مثال حقيقي.
+      const buttonData = interactiveButtonReply || buttonReply || req.body.button || null;
+      replyText = (buttonData && (buttonData.text || buttonData.title || buttonData.payload)) || null;
+      if (!replyText) {
+        console.warn('⚠️ استلمنا رد زرار من واتي بس مقدرناش نلاقي نص الزرار جواه — الـ payload كامل:', JSON.stringify(req.body));
+      }
+    }
+
+    if (waId && replyText) {
+      await handleIncomingReply({ fromPhone: waId, text: replyText });
     }
   } catch (err) {
     console.error('❌ خطأ في معالجة رد Wati:', err.message);
