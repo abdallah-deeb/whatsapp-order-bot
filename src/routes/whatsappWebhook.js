@@ -5,6 +5,7 @@ const whatsapp = require('../services/whatsapp');
 const templates = require('../services/templates');
 const woocommerce = require('../services/woocommerce');
 const ai = require('../services/ai');
+const messageConfig = require('../services/messageConfig');
 
 const router = express.Router();
 
@@ -22,6 +23,11 @@ const CONFIRMATION_MESSAGE_MARKER = 'أريد تأكيد طلبي رقم';
 // ما هو ممكن الرسالة كلها ترفض من واتساب. عشان كده اختصرته لأقرب صيغة بنفس
 // المعنى ("هضيف تفاصيل عنواني" — 18 حرف) بدل ما أخاطر إن الرسالة توصلش خالص.
 const ADDRESS_WILL_TYPE_BUTTON_LABEL = 'هضيف تفاصيل عنواني';
+// زرار تالت في نفس رسالة طلب العنوان — للعميلة اللي مش عارفة توصف عنوانها
+// بالتفصيل، فبتفضل تبعت لوكيشن واتساب بدل ما تكتب. بيتعامل معاه بالظبط زي
+// زرار "هضيف تفاصيل عنواني" (البوت بيستنى ويفكّرها لو اتأخرت) — الفرق إنها
+// هتبعت لوكيشن بدل نص.
+const LOCATION_WILL_SEND_BUTTON_LABEL = 'هبعت لوكيشن';
 // زرار تاني في نفس رسالة طلب العنوان — للعميلة اللي شايفة إن العنوان المسجل
 // على الأوردر أصلاً مظبوط ومش محتاجة تضيف تفاصيل زيادة. بندّيها لخدمة العملاء
 // على طول عشان تراجع العنوان المسجل يدويًا (البوت مالوش رؤية على بيانات
@@ -54,17 +60,43 @@ const OFFER_CHOSEN_MESSAGE = 'أنا في انتظارك 🌸 العرض متا�
 // الرسالة اللي بتتبعت لو العميلة اختارت تأكيد طلبها زي ما هو (من غير العرض).
 const ORDER_CONFIRMED_SHORT_MESSAGE = 'تم تأكيد طلبك بنجاح ✅ شكرًا لثقتك في Dolley Store 🌷';
 
-// لما العميلة تدوس "هضيف تفاصيل عنواني"، البوت ماينفعش يعتبر الدوسة دي نفسها
-// "رد مش واضح" ويسلّم على طول — لازم يستنى فعليًا لحد ما تكتب العنوان. بنبعتلها
-// رسالة استنى، ولو مبعتتش حاجة خلال 5 دقايق، بنفكّرها مرة واحدة بس.
+// لما العميلة تدوس "هضيف تفاصيل عنواني" أو "هبعت لوكيشن"، البوت ماينفعش يعتبر
+// الدوسة دي نفسها "رد مش واضح" ويسلّم على طول — لازم يستنى فعليًا لحد ما تبعت
+// العنوان. بنبعتلها رسالة استنى، ولو مبعتتش حاجة خلال المدة المحددة، بنفكّرها
+// مرة واحدة بس.
 const ADDRESS_WAITING_MESSAGE = 'تمام، أنا في انتظارك 🌸';
 const ADDRESS_REMINDER_MESSAGE = 'لسه مستنينك تبعتيلي العنوان بالتفصيل 📍 فين العنوان؟';
-const ADDRESS_REMINDER_DELAY_MS = 5 * 60 * 1000; // 5 دقايق
+// القيمة الافتراضية لو مفيش قيمة متسجلة في لوحة تحكم ووردبريس، أو تعذّر الاتصال بيها.
+const DEFAULT_ADDRESS_REMINDER_DELAY_MS = 5 * 60 * 1000; // 5 دقايق
+
+/**
+ * بتجيب مدة انتظار التذكير من إعدادات بلاجين ووردبريس (خانة "مدة انتظار العنوان
+ * قبل التذكير" في صفحة الإعدادات) — عشان تقدري تغيّريها من لوحة التحكم من غير
+ * أي لمسة كود. لو الإعداد مش موجود، أو ووردبريس مش متاح، أو القيمة مش رقم
+ * صحيح، بنرجع للقيمة الافتراضية (5 دقايق) بدل ما نوقف أي حاجة.
+ */
+async function getAddressReminderDelayMs() {
+  try {
+    const remote = await messageConfig.fetchBotMessages();
+    const minutes = Number(remote && remote.address_reminder_minutes);
+    if (Number.isFinite(minutes) && minutes > 0) {
+      return minutes * 60 * 1000;
+    }
+  } catch (err) {
+    console.warn('⚠️ تعذّر جلب مدة انتظار العنوان من لوحة التحكم، هنستخدم القيمة الافتراضية (5 دقايق):', err.message);
+  }
+  return DEFAULT_ADDRESS_REMINDER_DELAY_MS;
+}
 
 // تايمرات التذكير دي في الذاكرة بس (زي كل حاجة تانية في المشروع ده) — بتتصفر
 // لو السيرفر عمل restart، وده مقبول: أسوأ حاجة ممكن تحصل إن العميلة ماتوصلهاش
 // رسالة التذكير، مش إن حاجة تتكسر.
 const addressReminderTimers = new Map(); // phone -> Timeout handle
+// عداد بسيط لكل رقم — بيتزود كل مرة نلغي فيها تذكير قديم، عشان لو
+// scheduleAddressReminder لسه مستنية ترد لوحة التحكم بمدة الانتظار وفي نفس
+// الوقت وصل رد تاني من العميلة ألغى التذكير، الجدولة القديمة تعرف إنها بقت
+// "قديمة" ومتحطش تايمر بالغلط فوق حاجة اتلغت فعلاً.
+const addressReminderGeneration = new Map(); // phone -> counter
 
 function clearAddressReminder(phone) {
   const existing = addressReminderTimers.get(phone);
@@ -72,24 +104,32 @@ function clearAddressReminder(phone) {
     clearTimeout(existing);
     addressReminderTimers.delete(phone);
   }
+  addressReminderGeneration.set(phone, (addressReminderGeneration.get(phone) || 0) + 1);
 }
 
-function scheduleAddressReminder(phone) {
+async function scheduleAddressReminder(phone) {
   clearAddressReminder(phone);
+  const myGeneration = addressReminderGeneration.get(phone);
+  const delayMs = await getAddressReminderDelayMs();
+
+  // لو حصل إلغاء تاني (أو جدولة تانية) وإحنا لسه مستنيين قيمة المدة من لوحة
+  // التحكم، متعملش تايمر خالص — بقينا "قديمين".
+  if (addressReminderGeneration.get(phone) !== myGeneration) return;
+
   const timer = setTimeout(async () => {
     addressReminderTimers.delete(phone);
     // نتأكد إن المحادثة لسه في نفس المرحلة قبل ما نبعت التذكير — لو العميلة
     // بعتت العنوان أو خرجت عن السكريبت في المدة دي، التذكير مبقاش له لازمة.
     const latestConvo = conversationStore.getConversation(phone);
     if (latestConvo && latestConvo.state === 'awaiting_address') {
-      console.log(`⏰ مرّت 5 دقايق من غير ما رقم ${phone} يبعت العنوان — هنبعتله تذكير.`);
+      console.log(`⏰ فاتت مدة الانتظار من غير ما رقم ${phone} يبعت العنوان — هنبعتله تذكير.`);
       try {
         await whatsapp.sendMessage(phone, ADDRESS_REMINDER_MESSAGE);
       } catch (err) {
         console.error(`❌ فشل إرسال تذكير العنوان لرقم ${phone}:`, err.message);
       }
     }
-  }, ADDRESS_REMINDER_DELAY_MS);
+  }, delayMs);
   addressReminderTimers.set(phone, timer);
 }
 
@@ -117,7 +157,11 @@ const ADDRESS_DESCRIPTIVE_KEYWORDS = [
 function looksLikeRealAddress(text) {
   const trimmed = String(text || '').trim();
   if (!trimmed) return false;
-  if (trimmed === ADDRESS_WILL_TYPE_BUTTON_LABEL || trimmed === ADDRESS_ALREADY_FINE_BUTTON_LABEL) return false;
+  if (
+    trimmed === ADDRESS_WILL_TYPE_BUTTON_LABEL ||
+    trimmed === LOCATION_WILL_SEND_BUTTON_LABEL ||
+    trimmed === ADDRESS_ALREADY_FINE_BUTTON_LABEL
+  ) return false;
 
   const hasDigit = /\d/.test(trimmed);
   if (hasDigit && trimmed.length >= 10) return true;
@@ -198,14 +242,16 @@ function extractOrderIdFromMarkerMessage(text) {
  *    ممكن تكون أي حد بيكتب على رقم الواتساب — البوت ماينفعش يرد عليها، بنتجاهلها.
  * 1. مفيش محادثة متسجلة للرقم ده لسه، والرسالة فيها العلامة المميزة دي → دي فعلاً
  *    عميلة داخلة من زرار الواتساب في صفحة الشكر — بنطلع رقم الأوردر من نص الرسالة
- *    نفسها (لو موجود)، ونرد نطلب العنوان بالتفصيل (مع زرارين: "هضيف تفاصيل
- *    عنواني" / "كده تمام")، ونبدأ محادثة جديدة بحالة awaiting_address.
- * 2. awaiting_address → لازم عنوان حقيقي (طول كافي + فيه رقم). دوسة "كده تمام"
- *    → تسليم فوري لخدمة العملاء يراجعوا العنوان المسجل يدويًا. دوسة "هضيف
- *    تفاصيل عنواني" → مش تسليم، البوت بيستنى فعليًا ويفكّرها مرة واحدة لو
- *    مرت 5 دقايق من غير رد. أي رد تاني مش عنوان حقيقي (رفض، "أنا باعت العنوان
- *    مظبوط"، سؤال...) → تسليم فوري لخدمة العملاء (handed_off). لما يوصل عنوان
- *    فعلي، بنبعت السياسة (مع زرار "تمام")، ونحول الحالة لـ awaiting_final_confirmation.
+ *    نفسها (لو موجود)، ونرد نطلب العنوان بالتفصيل (مع 3 أزرار: "هضيف تفاصيل
+ *    عنواني" / "هبعت لوكيشن" / "كده تمام")، ونبدأ محادثة جديدة بحالة awaiting_address.
+ * 2. awaiting_address → لازم عنوان حقيقي (طول كافي + فيه رقم) أو لوكيشن واتساب
+ *    فعلي. دوسة "كده تمام" → تسليم فوري لخدمة العملاء يراجعوا العنوان المسجل
+ *    يدويًا. دوسة "هضيف تفاصيل عنواني" أو "هبعت لوكيشن" → مش تسليم، البوت
+ *    بيستنى فعليًا ويفكّرها مرة واحدة لو فاتت مدة الانتظار (قابلة للتعديل من
+ *    لوحة تحكم ووردبريس، افتراضيًا 5 دقايق) من غير رد. أي رد تاني مش عنوان
+ *    حقيقي (رفض، "أنا باعت العنوان مظبوط"، سؤال...) → تسليم فوري لخدمة العملاء
+ *    (handed_off). لما يوصل عنوان فعلي أو لوكيشن، بنبعت السياسة (مع زرار
+ *    "تمام")، ونحول الحالة لـ awaiting_final_confirmation.
  * 3. awaiting_final_confirmation → لازم موافقة واضحة ("موافق"/"تمام"...، أو
  *    دوسة الزرار). أي رد تاني (سؤال عن السياسة، رفض...) → تسليم فوري لخدمة
  *    العملاء (handed_off). لما توصل الموافقة، بنبعت رسالة التأكيد والعرض (مع
@@ -246,6 +292,7 @@ async function handleIncomingReply({ fromPhone, text }) {
       );
       await whatsapp.sendButtonMessage(fromPhone, await templates.buildAddressRequestMessage(), [
         ADDRESS_WILL_TYPE_BUTTON_LABEL,
+        LOCATION_WILL_SEND_BUTTON_LABEL,
         ADDRESS_ALREADY_FINE_BUTTON_LABEL,
       ]);
       return;
@@ -277,10 +324,11 @@ async function handleIncomingReply({ fromPhone, text }) {
       return;
     }
 
-    // "هضيف تفاصيل عنواني" = العميلة هتكتب العنوان دلوقتي — ده مش رد خارج عن
-    // السكريبت، ده بالظبط المتوقع منها. مايتسلّمش لخدمة العملاء؛ البوت بيستنى
-    // فعليًا، وبيفكّرها مرة واحدة لو مرت 5 دقايق من غير ما تبعت حاجة.
-    if (trimmedReply === ADDRESS_WILL_TYPE_BUTTON_LABEL) {
+    // "هضيف تفاصيل عنواني" أو "هبعت لوكيشن" = العميلة هتبعت العنوان دلوقتي
+    // (كتابة أو لوكيشن) — ده مش رد خارج عن السكريبت، ده بالظبط المتوقع منها.
+    // مايتسلّمش لخدمة العملاء؛ البوت بيستنى فعليًا، وبيفكّرها مرة واحدة لو
+    // فاتت مدة الانتظار من غير ما تبعت حاجة.
+    if (trimmedReply === ADDRESS_WILL_TYPE_BUTTON_LABEL || trimmedReply === LOCATION_WILL_SEND_BUTTON_LABEL) {
       console.log(`⏳ رقم ${fromPhone} هيبعت العنوان دلوقتي — هنستناه ونفكّره لو اتأخر.`);
       await whatsapp.sendMessage(fromPhone, ADDRESS_WAITING_MESSAGE);
       scheduleAddressReminder(fromPhone);
@@ -416,6 +464,7 @@ router.post('/twilio', async (req, res) => {
 // رسميًا من واتي، فبندور على أي حتة في الـ payload فيها نص زرار معروف).
 const KNOWN_BUTTON_LABELS = [
   ADDRESS_WILL_TYPE_BUTTON_LABEL,
+  LOCATION_WILL_SEND_BUTTON_LABEL,
   ADDRESS_ALREADY_FINE_BUTTON_LABEL,
   POLICY_BUTTON_LABEL,
   OFFER_BUTTON_LABEL,
