@@ -1,113 +1,74 @@
 const express = require('express');
 const config = require('../config');
-const orderStore = require('../services/orderStore');
-const woocommerce = require('../services/woocommerce');
+const conversationStore = require('../services/conversationStore');
 const whatsapp = require('../services/whatsapp');
-const ai = require('../services/ai');
 const templates = require('../services/templates');
 
 const router = express.Router();
 
+// النص الثابت اللي بلاجين "WhatsApp Order Confirmation Popup" بيحطه في أول رسالة
+// (اللي العميلة بتبعتها لما تدوس زرار "تأكيد الطلب عبر واتساب" في صفحة الشكر) — بنستخدمه
+// كعلامة مميزة عشان نتأكد إن الرسالة دي فعلاً جاية من الزرار ده، مش من أي حد بيكتب لنا
+// عادي على نفس رقم الواتساب. شوفي wa_show_confirmation_popup() في whatsapp-order-confirmation.php.
+const CONFIRMATION_MESSAGE_MARKER = 'أريد تأكيد طلبي رقم';
+
 /**
  * القلب النابض للبوت: بييجي هنا أي رد من العميل (من أي مزود)، وبيتحرك حسب مرحلة
- * محادثة الأوردر (order.state):
+ * محادثته على واتساب (convo.state) — من غير أي حاجة مرتبطة برقم أوردر معيّن أو
+ * تحديث على ووكومرس. البوت بس بيمشي في السكريبت المتفق عليه ويستنى رد العميل
+ * في كل مرحلة:
  *
- * 1. awaiting_confirmation → دي أول رسالة بتوصلنا من العميل (هو اللي بدأ المحادثة،
- *    من زرار الواتساب في صفحة الشكر أو بعد إرسال يدوي من لوحة التحكم) — بنرد نطلب
- *    العنوان بالتفصيل ورقم تواصل إضافي، ونحول الحالة لـ awaiting_address.
- * 2. awaiting_address → العميل بعت العنوان بالتفصيل — بنسجله كملاحظة على الأوردر،
- *    وبنبعت سياسة الاستبدال/الاسترجاع والمعاينة، ونحول الحالة لـ awaiting_final_confirmation.
- * 3. awaiting_final_confirmation (أو أي حالة تانية) → زي الشغل الأصلي: بنفهم رد العميل
- *    بالـ AI (تأكيد/إلغاء/تعديل) ونتصرف على أساسه.
+ * 0. مفيش محادثة متسجلة للرقم ده لسه، والرسالة مش رسالة تأكيد الأوردر الجاهزة من
+ *    البلاجين (مفيهاش "أريد تأكيد طلبي رقم") → دي مش عميلة داخلة من زرار الشكر،
+ *    ممكن تكون أي حد بيكتب على رقم الواتساب — البوت ماينفعش يرد عليها، بنتجاهلها.
+ * 1. مفيش محادثة متسجلة للرقم ده لسه، والرسالة فيها العلامة المميزة دي → دي فعلاً
+ *    عميلة داخلة من زرار الواتساب في صفحة الشكر — بنرد نطلب العنوان بالتفصيل ورقم
+ *    تواصل إضافي، ونبدأ محادثة جديدة بحالة awaiting_address.
+ * 2. awaiting_address → العميل بعت العنوان بالتفصيل — بنبعت سياسة الاستبدال/
+ *    الاسترجاع والمعاينة، ونحول الحالة لـ awaiting_final_confirmation.
+ * 3. awaiting_final_confirmation → أي رد من العميل هنا بنعتبره تأكيد (زي ما هو
+ *    متفق عليه: "لو موافقة على كل حاجة ردي بكلمة تمام") — بنبعت رسالة التأكيد
+ *    والعرض، ونحول الحالة لـ confirmed.
+ * 4. confirmed (أو أي حاجة بعد كده) → رد بسيط بس، مفيش سكريبت تاني.
  */
 async function handleIncomingReply({ fromPhone, text }) {
-  let order = orderStore.findPendingOrderByPhone(fromPhone);
+  let convo = conversationStore.getConversation(fromPhone);
 
-  // لو مش لاقيينه في الذاكرة، ده مش معناه إن الأوردر مش موجود — ممكن يكون السيرفر عمل
-  // restart (زي بعد أي تحديث على Render) وفقد كل اللي كان محفوظ مؤقتًا في الذاكرة.
-  // قبل ما نرفض رسالة العميلة، ندور على الأوردر مباشرة في ووكومرس نفسه.
-  if (!order) {
-    try {
-      order = await woocommerce.findRecentOrderByPhone(fromPhone);
-      if (order) {
-        orderStore.saveOrder(order);
-        console.log(`♻️ لقينا الأوردر #${order.id} في ووكومرس مباشرة (مكنش محفوظ في الذاكرة) وربطناه بالرقم ${fromPhone}`);
-      }
-    } catch (err) {
-      console.warn('⚠️ خطأ أثناء البحث عن الأوردر في ووكومرس كخطة بديلة:', err.message);
+  // أول رسالة من الرقم ده — منبدأش السكريبت غير لو الرسالة دي فعلاً رسالة تأكيد
+  // الأوردر الجاهزة من زرار البلاجين. أي رسالة تانية من رقم جديد بنتجاهلها تمامًا.
+  if (!convo) {
+    if (!String(text || '').includes(CONFIRMATION_MESSAGE_MARKER)) {
+      console.log(`ℹ️ رسالة من رقم ${fromPhone} مش رسالة تأكيد أوردر من زرار البلاجين، هنتجاهلها: "${text}"`);
+      return;
     }
-  }
-
-  if (!order) {
-    console.log(`ℹ️ رسالة من رقم ${fromPhone} مش مرتبطة بأي أوردر معروف: "${text}"`);
-    await whatsapp.sendMessage(
-      fromPhone,
-      'أهلاً بيك 👋 مش لاقيين أوردر مرتبط بالرقم ده حاليًا. لو عندك استفسار، فريقنا هيتواصل معاك.'
-    );
-    return;
-  }
-
-  if (order.state === 'awaiting_confirmation') {
-    order.state = 'awaiting_address';
-    orderStore.saveOrder(order);
+    convo = conversationStore.startConversation(fromPhone);
+    console.log(`👋 محادثة جديدة (من زرار البلاجين) مع رقم ${fromPhone} — هنطلب العنوان.`);
     await whatsapp.sendMessage(fromPhone, await templates.buildAddressRequestMessage());
     return;
   }
 
-  if (order.state === 'awaiting_address') {
-    order.state = 'awaiting_final_confirmation';
-    orderStore.saveOrder(order);
-    // بنسجل العنوان بالتفصيل ورقم التواصل الإضافي كملاحظة على الأوردر — الموظفة تراجعها
-    // وتوزّعها على حقول الشحن (زي ما بلاجين "Dolley Order Ops" بيتيح لها أصلًا).
-    await woocommerce.addOrderNote(order.id, `العنوان بالتفصيل ورقم التواصل الإضافي من العميل عبر واتساب:\n${text}`);
+  if (convo.state === 'awaiting_address') {
+    convo.state = 'awaiting_final_confirmation';
+    convo.addressText = text;
+    conversationStore.saveConversation(convo);
+    console.log(`📍 استلمنا العنوان من رقم ${fromPhone} — هنبعت السياسة.`);
     await whatsapp.sendMessage(fromPhone, await templates.buildPolicyMessage());
     return;
   }
 
-  const interpretation = await ai.interpretCustomerReply({ order, message: text });
-
-  switch (interpretation.intent) {
-    case 'confirm': {
-      order.state = 'confirmed';
-      orderStore.saveOrder(order);
-      await woocommerce.updateOrderStatus(order.id, 'processing');
-      await whatsapp.sendMessage(fromPhone, await templates.buildConfirmationOfferMessage());
-      break;
-    }
-
-    case 'cancel': {
-      order.state = 'cancelled';
-      orderStore.saveOrder(order);
-      await woocommerce.updateOrderStatus(order.id, 'cancelled');
-      await whatsapp.sendMessage(fromPhone, templates.buildOrderCancelledReply(order));
-      break;
-    }
-
-    case 'edit': {
-      order.state = 'edit_requested';
-      orderStore.saveOrder(order);
-      const noteText = interpretation.note || text;
-
-      if (interpretation.correctedAddress) {
-        await woocommerce.updateOrderShippingAddress(order.id, interpretation.correctedAddress);
-        order.shippingAddress = interpretation.correctedAddress;
-        orderStore.saveOrder(order);
-      }
-      // بنسيب الملاحظة على الأوردر عشان موظف يراجعها ويأكدها بشريًا — أمان أكتر من كون الـ AI يقرر لوحده في حاجات حساسة
-      await woocommerce.addOrderNote(order.id, `طلب تعديل من العميل عبر واتساب: ${noteText}`);
-
-      const reply = interpretation.suggestedReply || templates.buildEditAcknowledgedReply(order, noteText);
-      await whatsapp.sendMessage(fromPhone, reply);
-      break;
-    }
-
-    case 'unclear':
-    default: {
-      const reply = interpretation.suggestedReply || templates.buildUnclearReply(order);
-      await whatsapp.sendMessage(fromPhone, reply);
-      break;
-    }
+  if (convo.state === 'awaiting_final_confirmation') {
+    convo.state = 'confirmed';
+    conversationStore.saveConversation(convo);
+    console.log(`✅ رقم ${fromPhone} أكّد — هنبعت رسالة التأكيد والعرض.`);
+    await whatsapp.sendMessage(fromPhone, await templates.buildConfirmationOfferMessage());
+    return;
   }
+
+  // بعد التأكيد، أي رسالة تانية بترجع رد بسيط بس — مفيش سكريبت تاني بعد كده.
+  await whatsapp.sendMessage(
+    fromPhone,
+    'تمام، وصلتنا رسالتك ❤️ حد من فريقنا هيتابع معاك لو محتاجة أي حاجة تانية.'
+  );
 }
 
 /**

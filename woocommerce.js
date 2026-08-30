@@ -139,9 +139,14 @@ async function updateOrderShippingAddress(orderId, addressLine) {
  * مع أوردر #34244.
  */
 async function findRecentOrderByPhone(phone) {
-  if (!isConfigured()) return null;
+  if (!isConfigured()) {
+    console.warn('⚠️ [findRecentOrderByPhone] ووكومرس مش متوصل (متغيرات البيئة WOOCOMMERCE_* ناقصة) — مش هينفع ندور على الأوردر.');
+    return null;
+  }
   const normalizedTarget = normalizeEgyptPhone(phone);
   if (!normalizedTarget) return null;
+
+  console.log(`🔎 [findRecentOrderByPhone] بندور في ووكومرس عن أوردر لرقم ${normalizedTarget}...`);
 
   try {
     const res = await client().get('/orders', {
@@ -157,6 +162,8 @@ async function findRecentOrderByPhone(phone) {
     // مش منطقي نربط رسالة عميلة بأوردر ملغي أو مرتجع أو فشل — دي حالات "ميتة" مش هيكمل فيها الاتفاق.
     const deadStatuses = new Set(['cancelled', 'refunded', 'failed', 'trash']);
 
+    console.log(`🔎 [findRecentOrderByPhone] رجعلنا ${res.data.length} أوردر من ووكومرس، هنقارنهم بالرقم المطلوب.`);
+
     for (const raw of res.data) {
       if (deadStatuses.has(raw.status)) continue;
 
@@ -165,11 +172,15 @@ async function findRecentOrderByPhone(phone) {
 
       const billingPhone = normalizeEgyptPhone(raw.billing && raw.billing.phone);
       if (billingPhone && billingPhone === normalizedTarget) {
+        console.log(`✅ [findRecentOrderByPhone] لقينا تطابق: أوردر #${raw.id} (حالة: ${raw.status}, تليفون: ${billingPhone})`);
         return normalizeWooOrderPayload(raw);
       }
     }
+
+    console.warn(`⚠️ [findRecentOrderByPhone] مفيش أي أوردر من الـ ${res.data.length} دول رقم تليفونه بيطابق ${normalizedTarget}.`);
   } catch (err) {
-    console.warn('⚠️ تعذّر البحث عن أوردر بالرقم في ووكومرس:', err.message);
+    const details = err.response ? `HTTP ${err.response.status}: ${JSON.stringify(err.response.data)}` : err.message;
+    console.warn('⚠️ [findRecentOrderByPhone] تعذّر البحث عن أوردر بالرقم في ووكومرس:', details);
   }
 
   return null;
