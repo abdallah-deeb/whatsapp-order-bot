@@ -93,24 +93,44 @@ function extractOrderIdFromMarkerMessage(text) {
  * 5. handed_off → البوت بيتوقف تمامًا، مايردش خالص — الفريق هو اللي بيكمل من
  *    تطبيق واتساب بيزنس مباشرة.
  * 6. closed (أو أي حاجة بعد كده) → رد بسيط بس، مفيش سكريبت تاني.
+ *
+ * ⚠️ مهم: التخزين ده بالرقم بس (مش بالأوردر)، فلو نفس الرقم عمل أوردر جديد بعد
+ * ما محادثته الأولى وصلت لـ handed_off أو closed، لازم البوت يبدأ معاه من
+ * الأول تاني على الأوردر الجديد — مش يفضل ساكت لأبد الأبد لمجرد إن أوردر
+ * قديم خالص اتحول لخدمة العملاء. عشان كده أي رسالة فيها العلامة المميزة
+ * (يعني جاية فعلاً من زرار الواتساب في صفحة الشكر) بتبدأ محادثة جديدة من
+ * الصفر لو رقم الأوردر مختلف عن اللي كان متسجل قبل كده، أو لو المحادثة
+ * القديمة كانت خلصت أصلاً (handed_off/closed) — حتى لو نفس رقم الأوردر.
  */
 async function handleIncomingReply({ fromPhone, text }) {
+  const messageText = String(text || '');
+  const isMarkerMessage = messageText.includes(CONFIRMATION_MESSAGE_MARKER);
   let convo = conversationStore.getConversation(fromPhone);
 
-  // أول رسالة من الرقم ده — منبدأش السكريبت غير لو الرسالة دي فعلاً رسالة تأكيد
-  // الأوردر الجاهزة من زرار البلاجين. أي رسالة تانية من رقم جديد بنتجاهلها تمامًا.
-  if (!convo) {
-    if (!String(text || '').includes(CONFIRMATION_MESSAGE_MARKER)) {
-      console.log(`ℹ️ رسالة من رقم ${fromPhone} مش رسالة تأكيد أوردر من زرار البلاجين، هنتجاهلها: "${text}"`);
+  if (isMarkerMessage) {
+    const newOrderId = extractOrderIdFromMarkerMessage(messageText);
+    const isDifferentOrder = !convo || convo.orderId !== newOrderId;
+    const oldConversationIsDone = convo && (convo.state === 'handed_off' || convo.state === 'closed');
+
+    if (isDifferentOrder || oldConversationIsDone) {
+      convo = conversationStore.startConversation(fromPhone);
+      convo.orderId = newOrderId;
+      conversationStore.saveConversation(convo);
+      console.log(
+        `👋 محادثة جديدة (من زرار البلاجين) مع رقم ${fromPhone}${convo.orderId ? ` — أوردر #${convo.orderId}` : ' — مقدرناش نلاقي رقم الأوردر في الرسالة'} — هنطلب العنوان.`
+      );
+      await whatsapp.sendButtonMessage(fromPhone, await templates.buildAddressRequestMessage(), ['تأكيد البيانات']);
       return;
     }
-    convo = conversationStore.startConversation(fromPhone);
-    convo.orderId = extractOrderIdFromMarkerMessage(text);
-    conversationStore.saveConversation(convo);
-    console.log(
-      `👋 محادثة جديدة (من زرار البلاجين) مع رقم ${fromPhone}${convo.orderId ? ` — أوردر #${convo.orderId}` : ' — مقدرناش نلاقي رقم الأوردر في الرسالة'} — هنطلب العنوان.`
-    );
-    await whatsapp.sendButtonMessage(fromPhone, await templates.buildAddressRequestMessage(), ['تأكيد البيانات']);
+    // نفس الأوردر ولسه المحادثة شغالة (مش متسلمة ولا مقفولة) — على الأغلب
+    // دوسة تانية بالغلط على نفس زرار الواتساب، بنسيبها تكمل عادي من غير ما
+    // نبدأ من الأول تاني (السطر اللي جاي تحت هيكمل يعالجها حسب مرحلتها الحالية).
+  }
+
+  // أول رسالة من الرقم ده (ومفيهاش العلامة المميزة) — دي مش عميلة داخلة من
+  // زرار الشكر، ممكن تكون أي حد بيكتب على رقم الواتساب — بنتجاهلها.
+  if (!convo) {
+    console.log(`ℹ️ رسالة من رقم ${fromPhone} مش رسالة تأكيد أوردر من زرار البلاجين، هنتجاهلها: "${messageText}"`);
     return;
   }
 
